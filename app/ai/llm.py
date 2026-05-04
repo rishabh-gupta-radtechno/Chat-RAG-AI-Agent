@@ -3,6 +3,7 @@ Ollama LLM client for local model inference.
 """
 
 import httpx
+import time
 from typing import Optional
 
 from app.core.config import get_settings
@@ -20,7 +21,15 @@ class OllamaClient:
         self.model = settings.ollama_chat_model
         self.embedding_model = settings.ollama_embedding_model
         self.embeddings_path = settings.ollama_embeddings_path
-        self.client = httpx.AsyncClient(timeout=300.0)  # 5 minute timeout
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                settings.ollama_timeout_seconds,
+                connect=10.0,
+                read=settings.ollama_timeout_seconds,
+                write=30.0,
+                pool=10.0,
+            )
+        )
 
     async def generate(
         self,
@@ -31,11 +40,17 @@ class OllamaClient:
     ) -> str:
         """Generate text using Ollama."""
         try:
+            started_at = time.perf_counter()
             messages = []
             if system:
                 messages.append({"role": "system", "content": system})
             messages.append({"role": "user", "content": prompt})
 
+            logger.info(
+                "Ollama chat request model=%s prompt_chars=%s",
+                self.model,
+                len(prompt),
+            )
             response = await self.client.post(
                 f"{self.base_url.rstrip('/')}/api/chat",
                 json={
@@ -44,7 +59,10 @@ class OllamaClient:
                     "options": {
                         "temperature": temperature,
                         "top_p": top_p,
+                        "num_ctx": settings.ollama_num_ctx,
+                        "num_predict": settings.ollama_num_predict,
                     },
+                    "keep_alive": "10m",
                     "stream": False,
                 },
             )
@@ -55,8 +73,18 @@ class OllamaClient:
                 )
 
             result = response.json()
+            logger.info(
+                "Ollama chat completed model=%s duration_seconds=%.2f",
+                self.model,
+                time.perf_counter() - started_at,
+            )
             return result.get("message", {}).get("content", "")
 
+        except httpx.ReadTimeout as e:
+            raise TimeoutError(
+                f"Ollama model {self.model} did not respond within "
+                f"{settings.ollama_timeout_seconds} seconds"
+            ) from e
         except Exception:
             logger.exception("Error generating text with Ollama model %s", self.model)
             raise

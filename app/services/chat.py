@@ -10,11 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.rag import RAGPipeline
 from app.ai.agent import ReActAgent
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.repositories.chat import ChatHistoryRepository
 from app.schemas import ChatResponse, SourceReference
 
 logger = get_logger(__name__)
+settings = get_settings()
 
 
 class ChatService:
@@ -60,14 +62,14 @@ class ChatService:
                 question=question,
                 answer=response.get("answer", ""),
                 sources=[s.model_dump(mode="json") for s in sources],
-                model="mistral",
+                model=settings.ollama_chat_model,
             )
             await self.chat_repo.commit()
 
             return ChatResponse(
                 answer=response.get("answer", ""),
                 sources=sources,
-                model="mistral",
+                model=settings.ollama_chat_model,
                 thinking=response.get("thinking"),
             )
 

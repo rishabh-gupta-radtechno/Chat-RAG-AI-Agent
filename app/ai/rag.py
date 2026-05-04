@@ -62,7 +62,7 @@ class RAGPipeline:
                     embedding = await self.llm_client.embed(chunk)
 
                     vectors.append({
-                        "id": i,
+                        "id": str(uuid.uuid5(file_id, str(i))),
                         "embedding": embedding,
                         "metadata": {
                             "file_id": str(file_id),
@@ -103,11 +103,31 @@ class RAGPipeline:
             logger.info(f"Generated embedding for query: {query}")
 
             # Search vector database
-            documents = await self.vector_db.search(
+            semantic_documents = await self.vector_db.search(
                 query_embedding=query_embedding,
                 top_k=top_k,
                 threshold=settings.similarity_threshold,
             )
+            keyword_documents = await self.vector_db.keyword_search(
+                query=query,
+                limit=top_k,
+            )
+
+            documents_by_id = {}
+            for document in semantic_documents + keyword_documents:
+                document_id = document.get("id")
+                existing = documents_by_id.get(document_id)
+                if (
+                    existing is None
+                    or document.get("relevance_score", 0.0) > existing.get("relevance_score", 0.0)
+                ):
+                    documents_by_id[document_id] = document
+
+            documents = sorted(
+                documents_by_id.values(),
+                key=lambda document: document.get("relevance_score", 0.0),
+                reverse=True,
+            )[:top_k]
 
             logger.info(f"Retrieved {len(documents)} documents")
             return documents

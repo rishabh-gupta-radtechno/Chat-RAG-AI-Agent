@@ -12,6 +12,7 @@ from app.db.database import get_db
 from app.schemas import FileListResponse, FileUploadResponse, SyncEmbeddingsResponse
 from app.services.file import FileService
 from app.ai.rag import RAGPipeline
+from app.ai.vector_db import VectorDBClient
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -101,12 +102,22 @@ async def delete_file(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file ID")
 
         file_service = FileService(session)
-        success = await file_service.delete_file(file_uuid, user_id)
+        file_obj = await file_service.get_file(file_uuid)
+        if not file_obj or file_obj.uploaded_by != user_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
+        vector_db = VectorDBClient()
+        await vector_db.delete_by_file_id(str(file_uuid))
+
+        success = await file_service.delete_file(file_uuid, user_id)
         if not success:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
-        return {"status": "deleted", "file_id": file_id}
+        return {
+            "status": "deleted",
+            "file_id": file_id,
+            "embeddings_deleted": True,
+        }
 
     except HTTPException:
         raise
@@ -141,6 +152,7 @@ async def sync_embeddings(
         # Process embeddings
         rag_pipeline = RAGPipeline()
         await rag_pipeline.initialize()
+        await rag_pipeline.vector_db.delete_by_file_id(str(file_uuid))
         chunks_created = await rag_pipeline.process_document(
             filepath=file_obj.filepath,
             file_id=file_uuid,
