@@ -1,0 +1,105 @@
+"""
+Main FastAPI application.
+"""
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.api import auth, chat, files, health
+from app.core.config import get_settings
+from app.core.logging import setup_logging, get_logger
+from app.db.database import create_all_tables
+from app.ai.rag import RAGPipeline
+
+# Setup logging
+setup_logging()
+logger = get_logger(__name__)
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan context manager."""
+    # Startup
+    logger.info("Starting application...")
+
+    try:
+        # Create database tables
+        await create_all_tables()
+        logger.info("Database tables created")
+
+        # Initialize RAG pipeline
+        rag_pipeline = RAGPipeline()
+        await rag_pipeline.initialize()
+        logger.info("RAG pipeline initialized")
+
+    except Exception as e:
+        logger.error(f"Error during startup: {e}")
+        raise
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down application...")
+
+
+def create_app() -> FastAPI:
+    """Create and configure FastAPI application."""
+    app = FastAPI(
+        title=settings.api_title,
+        version=settings.api_version,
+        debug=settings.debug,
+        lifespan=lifespan,
+    )
+
+    # Add CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Mount static files
+    import os
+    if not os.path.exists(settings.upload_dir):
+        os.makedirs(settings.upload_dir)
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+    # Include routers
+    app.include_router(auth.router)
+    app.include_router(files.router)
+    app.include_router(chat.router)
+    app.include_router(health.router)
+
+    # Root endpoint
+    @app.get("/")
+    async def root():
+        return {
+            "message": "Chat RAG AI Agent API",
+            "version": settings.api_version,
+            "docs": "/docs",
+        }
+
+    return app
+
+
+# Create app instance
+app = create_app()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=settings.debug,
+        log_level=settings.log_level.lower(),
+    )
