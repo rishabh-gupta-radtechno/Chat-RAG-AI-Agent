@@ -3,6 +3,7 @@ Chat and RAG service with LLM integration.
 """
 
 import json
+import re
 import uuid
 from typing import Optional
 
@@ -41,8 +42,11 @@ class ChatService:
             documents = await self.rag_pipeline.retrieve(question)
             logger.info(f"Retrieved {len(documents)} documents")
 
+            language_mode = self._detect_language_mode(question)
+            logger.info(f"Detected language mode: {language_mode}")
+
             # Process with ReAct agent
-            response = await self.agent.process(question, documents)
+            response = await self.agent.process(question, documents, language_mode)
             logger.info(f"Agent generated response")
 
             # Extract sources from documents
@@ -76,6 +80,61 @@ class ChatService:
         except Exception as e:
             logger.error(f"Error processing question: {e}")
             raise
+
+    def _detect_language_mode(self, question: str) -> str:
+        """Detect whether the question is English, Hindi, or mixed (Hinglish)."""
+        text = question.strip()
+        if not text:
+            return "english"
+
+        has_devanagari = bool(re.search(r"[\u0900-\u097F]", text))
+        has_latin = bool(re.search(r"[A-Za-z]", text))
+        lower_text = text.lower()
+
+        roman_hindi_words = {
+            "kya",
+            "hai",
+            "ka",
+            "ke",
+            "ki",
+            "kahan",
+            "kaha",
+            "kaise",
+            "kuch",
+            "nahi",
+            "nahin",
+            "mujhe",
+            "tum",
+            "aap",
+            "yeh",
+            "woh",
+            "agar",
+            "toh",
+            "bhi",
+            "mera",
+            "meri",
+            "hum",
+            "tha",
+            "thi",
+            "haan",
+            "nahi",
+            "kisi",
+            "kaun",
+            "kab",
+        }
+
+        contains_roman_hindi = any(word in lower_text.split() for word in roman_hindi_words)
+
+        if has_devanagari and not has_latin:
+            return "hindi"
+        if has_latin and contains_roman_hindi and not has_devanagari:
+            return "hinglish"
+        if has_latin and not contains_roman_hindi:
+            return "english"
+        if has_devanagari:
+            return "hindi"
+
+        return "english"
 
     async def get_chat_history(
         self,
