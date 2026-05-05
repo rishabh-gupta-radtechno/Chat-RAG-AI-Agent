@@ -32,6 +32,7 @@ class ReActAgent:
         self,
         question: str,
         documents: list[dict],
+        language_mode: str = "english",
     ) -> dict:
         """Process question using ReAct pattern."""
         try:
@@ -40,6 +41,7 @@ class ReActAgent:
             state = {
                 "question": question,
                 "documents": documents,
+                "language_mode": language_mode,
                 "observation": self._format_context(documents),
                 "answer": "",
             }
@@ -156,6 +158,28 @@ class ReActAgent:
 
         return text[original_position:]
 
+    def _language_instructions(self, language_mode: str) -> str:
+        """Return prompt instructions for bilingual answer formatting."""
+        if language_mode == "hindi":
+            return (
+                "Answer first in Hindi using Devanagari script. "
+                "Then provide a clear English translation labeled 'English Translation:'. "
+                "Do not include Romanized Hindi in the Hindi section."
+            )
+        if language_mode == "hinglish":
+            return (
+                "Answer the question in two sections.\n"
+                "Answer (English):\n"
+                "<clear English answer>\n\n"
+                "Answer (Hinglish):\n"
+                "<same answer written ONLY in English letters, NO Hindi script>\n"
+                "Use ONLY English alphabets. Natural spoken style. Examples: 'ek device hai', 'pressure ko control karta hai', 'isse kam karta hai'."
+            )
+        return (
+            "Answer first in English. Then provide a Hindi translation using Devanagari script labeled 'Hindi Translation:'. "
+            "Do not put the Hindi translation in Roman letters."
+        )
+
     @staticmethod
     def _procedure_steps(text: str) -> list[str]:
         command_pattern = re.compile(
@@ -199,14 +223,15 @@ Context:
 
 No relevant uploaded document context was found. Say that the uploaded documents do not provide enough information."""
 
+            instructions = self._language_instructions(state.get("language_mode", "english"))
             answer = await self.llm_client.generate(
-                prompt,
-                system="You are a careful RAG assistant. Do not invent facts.",
+                prompt + "\n\n" + instructions,
+                system="You are a careful bilingual RAG assistant. Do not invent facts.",
                 temperature=0.2,
                 top_p=0.9,
             )
-            state["answer"] = answer
-            logger.info(f"Generated answer: {answer[:100]}...")
+            state["answer"] = answer.strip()
+            logger.info(f"Generated answer: {state['answer'][:100]}...")
 
             return state
 
