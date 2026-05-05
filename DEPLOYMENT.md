@@ -121,7 +121,7 @@ For serverless deployment, consider:
    metadata:
      name: chat-rag-config
    data:
-     OLLAMA_CHAT_MODEL: "mistral"
+     OLLAMA_CHAT_MODEL: "qwen2.5:3b"
      OLLAMA_EMBEDDING_MODEL: "nomic-embed-text"
      ENV: "production"
    ```

@@ -67,7 +67,7 @@ alembic/                # Database migrations (optional)
 - **Async**: asyncio with asyncpg
 - **Database**: PostgreSQL with SQLAlchemy
 - **Vector DB**: Qdrant
-- **LLM**: Ollama (mistral)
+- **LLM**: Ollama (qwen2.5:3b)
 - **Auth**: JWT (PyJWT + bcrypt)
 - **Validation**: Pydantic v2
 - **Container**: Docker & Docker Compose
@@ -136,7 +136,8 @@ docker exec -it chat-rag-ollama ollama pull nomic-embed-text
 
 2. Pull chat model for communication
 ```bash
-docker exec -it chat-rag-ollama ollama pull mistral
+docker exec -it chat-rag-ollama ollama pull nomic-embed-text
+docker exec -it chat-rag-ollama ollama pull qwen2.5:3b
 ```
 
 
@@ -250,7 +251,7 @@ Response:
       "relevance_score": 0.87
     }
   ],
-  "model": "mistral",
+  "model": "nomic-embed-text",
   "thinking": "Iterations: 1\nThought: The question asks for key findings..."
 }
 ```
@@ -463,7 +464,7 @@ QDRANT_URL=http://localhost:6333
 
 # LLM
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_CHAT_MODEL=mistral
+OLLAMA_CHAT_MODEL=qwen2.5:3b
 OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 OLLAMA_EMBEDDINGS_PATH=/api/embeddings
 
