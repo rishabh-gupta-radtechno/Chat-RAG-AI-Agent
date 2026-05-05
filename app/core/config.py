@@ -38,10 +38,12 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"
-    ollama_chat_model: str = "mistral"
+    ollama_chat_model: str = "qwen2.5:3b"
     ollama_embedding_model: str = "nomic-embed-text"
     ollama_embeddings_path: str = "/api/embeddings"
-   
+    ollama_timeout_seconds: int = 600
+    ollama_num_ctx: int = 4096
+    ollama_num_predict: int = 160
 
     # File Upload
     upload_dir: str = "static/uploads"
@@ -56,6 +58,8 @@ class Settings(BaseSettings):
     # RAG
     vector_search_top_k: int = 5
     similarity_threshold: float = 0.5
+    rag_context_docs: int = 3
+    rag_context_max_chars: int = 4000
 
     # Logging
     log_level: str = "INFO"
