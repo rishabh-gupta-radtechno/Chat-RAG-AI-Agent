@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     rag_context_docs: int = 3
     rag_context_max_chars: int = 4000
 
+    # Language
+    default_language: str = "en"          # "en" or "hi"
+    supported_languages: list = ["en", "hi"]
+
     # Logging
     log_level: str = "INFO"
 

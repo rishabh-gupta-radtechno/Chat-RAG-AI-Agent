@@ -7,6 +7,7 @@ from enum import Enum
 
 from app.ai.llm import OllamaClient
 from app.core.config import get_settings
+from app.core.language import LANG_ENGLISH, language_name
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -32,6 +33,7 @@ class ReActAgent:
         self,
         question: str,
         documents: list[dict],
+        lang: str = LANG_ENGLISH,
     ) -> dict:
         """Process question using ReAct pattern."""
         try:
@@ -48,7 +50,7 @@ class ReActAgent:
             if extracted_answer:
                 state["answer"] = extracted_answer
             else:
-                state = await self._respond(state)
+                state = await self._respond(state, lang=lang)
 
             return {
                 "answer": state.get("answer", ""),
@@ -180,8 +182,9 @@ class ReActAgent:
 
         return steps
 
-    async def _respond(self, state: dict) -> dict:
+    async def _respond(self, state: dict, lang: str = LANG_ENGLISH) -> dict:
         """Respond step: Generate final answer."""
+        lang_instruction = f"Respond in {language_name(lang)}."
         try:
             if state.get("observation"):
                 prompt = f"""Answer the question using only the provided context.
@@ -189,6 +192,7 @@ The question may contain grammar mistakes. Match the important technical terms.
 If the context contains a section heading that matches the question, summarize the steps under that section.
 Only say the uploaded documents do not provide enough information when no relevant section or details are present.
 Keep the answer direct and concise, using numbered steps when the context describes a procedure.
+{lang_instruction}
 
 Question: {state['question']}
 
@@ -197,11 +201,12 @@ Context:
             else:
                 prompt = f"""The user asked: {state['question']}
 
-No relevant uploaded document context was found. Say that the uploaded documents do not provide enough information."""
+No relevant uploaded document context was found. Say that the uploaded documents do not provide enough information.
+{lang_instruction}"""
 
             answer = await self.llm_client.generate(
                 prompt,
-                system="You are a careful RAG assistant. Do not invent facts.",
+                system=f"You are a careful RAG assistant. Do not invent facts. {lang_instruction}",
                 temperature=0.2,
                 top_p=0.9,
             )

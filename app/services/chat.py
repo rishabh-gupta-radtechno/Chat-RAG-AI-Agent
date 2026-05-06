@@ -12,6 +12,7 @@ from app.ai.rag import RAGPipeline
 from app.ai.agent import ReActAgent
 from app.ai.llm import OllamaClient
 from app.core.config import get_settings
+from app.core.language import detect_language, language_name
 from app.core.logging import get_logger
 from app.repositories.chat import ChatHistoryRepository
 from app.schemas import (
@@ -68,6 +69,9 @@ class ChatService:
                 limit=6,
             )
 
+            lang = detect_language(message)
+            logger.info(f"Detected language: {lang}")
+
             retrieval_query = self._build_retrieval_query(message, history)
 
             # Retrieve relevant documents
@@ -79,6 +83,7 @@ class ChatService:
                 message=message,
                 documents=documents,
                 history=history,
+                lang=lang,
             )
             logger.info("Agent generated response")
 
@@ -128,6 +133,7 @@ class ChatService:
         message: str,
         documents: list[dict],
         history: list,
+        lang: str = "en",
     ) -> dict:
         """Generate an answer with retrieved docs and recent conversation context."""
         extracted_answer = self.agent._extract_procedure_answer(message, documents)
@@ -144,10 +150,12 @@ class ChatService:
             history_lines.append(f"Assistant: {turn.answer}")
         history_text = "\n".join(history_lines) if history_lines else "No previous conversation."
 
+        lang_instruction = f"Respond in {language_name(lang)}."
         prompt = f"""Answer the user's latest message using the retrieved context and recent conversation.
 Use the conversation history for follow-up references such as 'it', 'that', or 'the above part'.
 If the retrieved context does not support the answer, say the uploaded documents do not provide enough information.
 Keep the answer direct and concise.
+{lang_instruction}
 
 Recent conversation:
 {history_text}
@@ -160,7 +168,7 @@ Retrieved context:
 
         answer = await self.llm_client.generate(
             prompt,
-            system="You are a careful RAG assistant. Use recent chat history only as conversational context, and use the retrieved documents as the factual source of truth.",
+            system=f"You are a careful RAG assistant. Use recent chat history only as conversational context, and use the retrieved documents as the factual source of truth. {lang_instruction}",
             temperature=0.2,
             top_p=0.9,
         )
