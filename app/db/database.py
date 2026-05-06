@@ -4,6 +4,7 @@ Database connection and session management.
 
 from typing import AsyncGenerator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -46,6 +47,40 @@ async def create_all_tables():
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text('CREATE EXTENSION IF NOT EXISTS "pgcrypto"'))
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE chat_histories
+                ADD COLUMN IF NOT EXISTS conversation_id UUID
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                UPDATE chat_histories
+                SET conversation_id = gen_random_uuid()
+                WHERE conversation_id IS NULL
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE chat_histories
+                ALTER COLUMN conversation_id SET NOT NULL
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_histories_conversation_id
+                ON chat_histories (conversation_id)
+                """
+            )
+        )
 
 
 async def drop_all_tables():

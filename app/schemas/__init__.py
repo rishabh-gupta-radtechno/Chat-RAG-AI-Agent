@@ -108,11 +108,30 @@ class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=5000)
 
 
+class ConversationChatRequest(BaseModel):
+    """Conversation-aware chat request schema."""
+
+    message: str = Field(..., min_length=1, max_length=5000)
+    conversation_id: Optional[UUID] = None
+
+
 class ChatResponse(BaseModel):
     """Chat response schema."""
 
     model_config = ConfigDict(from_attributes=True)
 
+    answer: str
+    sources: list[SourceReference]
+    model: str
+    thinking: Optional[str] = None
+
+
+class ConversationChatResponse(BaseModel):
+    """Conversation-aware chat response schema."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    conversation_id: UUID
     answer: str
     sources: list[SourceReference]
     model: str
@@ -125,9 +144,34 @@ class ChatHistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    conversation_id: UUID
     question: str
     answer: str
     sources: list[SourceReference]
+    created_at: datetime
+
+
+class ConversationTurnResponse(BaseModel):
+    """Single turn within a conversation."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    conversation_id: UUID
+    question: str
+    answer: str
+    sources: list[SourceReference]
+    model: str
+    created_at: datetime
+
+
+class ConversationSummaryResponse(BaseModel):
+    """Conversation summary row."""
+
+    conversation_id: UUID
+    last_question: str
+    last_answer: str
+    model: str
     created_at: datetime
 
 
