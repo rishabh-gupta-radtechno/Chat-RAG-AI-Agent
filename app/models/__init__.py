@@ -77,7 +77,7 @@ class ChatHistory(Base):
     question: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
     sources: Mapped[str] = mapped_column(Text, nullable=True)  # JSON string of sources
-    model: Mapped[str] = mapped_column(String(100), default="mistral")
+    model: Mapped[str] = mapped_column(String(100), default="qwen2.5:3b")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

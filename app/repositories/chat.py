@@ -11,8 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ChatHistory
 from app.repositories.base import BaseRepository
-
-
 class ChatHistoryRepository(BaseRepository[ChatHistory]):
     """Chat history repository with additional queries."""
 
@@ -37,7 +35,7 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
         question: str,
         answer: str,
         sources: list[dict],
-        model: str = "mistral",
+        model: Optional[str] = None,
     ) -> ChatHistory:
         """Create chat history with sources."""
         sources_json = json.dumps(sources, default=str)
@@ -46,5 +44,5 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
             question=question,
             answer=answer,
             sources=sources_json,
-            model=model,
+            model=model or "",
         )
