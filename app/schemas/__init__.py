@@ -100,6 +100,23 @@ class SourceReference(BaseModel):
     file_id: UUID
     chunk_index: int
     relevance_score: float
+    page_number: int = 0
+    document_page_number: Optional[int] = None
+    content_type: Optional[str] = None
+    excerpt: Optional[str] = None
+
+
+class DiagramReference(BaseModel):
+    """Diagram reference for chat response."""
+
+    filename: str
+    file_id: UUID
+    page_number: int
+    document_page_number: Optional[int] = None
+    image_index: Optional[int] = None
+    description: str
+    image_url: Optional[str] = None
+    relevance_score: float = 0.0
 
 
 class ChatRequest(BaseModel):
@@ -122,6 +139,7 @@ class ChatResponse(BaseModel):
 
     answer: str
     sources: list[SourceReference]
+    diagrams: list[DiagramReference] = Field(default_factory=list)
     model: str
     thinking: Optional[str] = None
 
@@ -134,6 +152,7 @@ class ConversationChatResponse(BaseModel):
     conversation_id: UUID
     answer: str
     sources: list[SourceReference]
+    diagrams: list[DiagramReference] = Field(default_factory=list)
     model: str
     thinking: Optional[str] = None
 

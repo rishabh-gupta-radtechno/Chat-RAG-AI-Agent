@@ -157,6 +157,7 @@ async def sync_embeddings(
             filepath=file_obj.filepath,
             file_id=file_uuid,
             filename=file_obj.filename,
+            user_id=user_id,
         )
 
         # Mark file as embedded

@@ -73,9 +73,9 @@ services:
       - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
       - OLLAMA_TIMEOUT_SECONDS=600
       - OLLAMA_NUM_CTX=4096
-      - OLLAMA_NUM_PREDICT=160
-      - RAG_CONTEXT_DOCS=3
-      - RAG_CONTEXT_MAX_CHARS=4000
+      - OLLAMA_NUM_PREDICT=512
+      - RAG_CONTEXT_DOCS=6
+      - RAG_CONTEXT_MAX_CHARS=8000
       - DEBUG=False
       - ENV=production
     volumes:
