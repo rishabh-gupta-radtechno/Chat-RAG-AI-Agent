@@ -78,9 +78,6 @@ services:
       - RAG_CONTEXT_MAX_CHARS=8000
       - DEBUG=False
       - ENV=production
-    volumes:
-      - ./app:/app/app
-      - ./static:/app/static
     depends_on:
       postgres:
         condition: service_healthy
