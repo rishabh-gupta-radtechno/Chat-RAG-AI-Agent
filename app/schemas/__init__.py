@@ -1,7 +1,6 @@
 """
 Pydantic schemas for request/response validation.
 """
-
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -195,3 +194,46 @@ class DetailedHealthResponse(BaseModel):
     vector_db: Optional[str] = None
     llm: Optional[str] = None
     errors: list[str] = []
+
+
+# ============ Admin Schemas ============
+
+
+class AdminBase(BaseModel):
+    name: str
+    email: EmailStr
+    is_enabled: bool = True
+
+
+class AdminCreate(AdminBase):
+    password: str
+
+
+class AdminUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    password: Optional[str] = None
+    is_enabled: Optional[bool] = None
+
+class AdminLoginRequest(BaseModel):
+    """Admin login request schema."""
+    email: EmailStr
+    password: str
+
+class AdminLoginResponse(BaseModel):
+    """Admin login response schema."""
+    token: str
+    name: str
+    email: EmailStr
+
+class AdminResponse(AdminBase):
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AdminDeleteResponse(BaseModel):
+    id: UUID
+    message: str = "Admin deleted successfully"

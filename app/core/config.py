@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     cors_origins: list = [
         "http://localhost:3000",
         "http://localhost:8000",
+        "http://localhost:4200",
     ]
 
     class Config:
