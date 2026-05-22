@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # API
     api_title: str = "Chat RAG AI Agent"
     api_version: str = "1.0.0"
-    debug: bool = False
+    debug: bool = True
     env: str = "development"
 
     # Database
@@ -55,7 +55,10 @@ class Settings(BaseSettings):
     chunk_size: int = 1024
     chunk_overlap: int = 128
     pdf_chunk_size: int = 450
-    pdf_chunk_overlap: int = 80
+    pdf_chunk_overlap: int = 50
+    pdf_chunk_min_chars: int = 600
+    pdf_chunk_max_chars: int = 1000
+    pdf_chunk_overlap_chars: int = 100
 
     # PDF Processing
     use_docling: bool = True  # Use Docling for advanced PDF processing

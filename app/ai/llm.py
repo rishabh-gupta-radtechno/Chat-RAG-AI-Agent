@@ -103,10 +103,13 @@ class OllamaClient:
         else:
             payload["prompt"] = text
 
+        logger.info(f"DEBUG: Ollama embed request url={url} model={self.embedding_model} text_length={len(text)}")
+        logger.info(f"DEBUG: Ollama embed payload keys={list(payload.keys())}")
         response = await self.client.post(url, json=payload)
 
         logger.info("Ollama embed request %s %s", response.request.method, response.url)
         logger.info("Ollama embed status %s", response.status_code)
+        logger.info(f"DEBUG: Ollama embed status={response.status_code} response={response.text[:400]!r}")
         logger.debug("Ollama embed response: %s", response.text)
 
         if response.status_code != 200:

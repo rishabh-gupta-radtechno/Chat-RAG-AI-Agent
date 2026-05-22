@@ -107,3 +107,112 @@ def test_build_pdf_chunks_deduplicates_repeated_page_chunks():
 
     assert len(chunks) == 1
     assert chunks[0]["metadata"]["chunk_id"].startswith("test-file.pdf|page1|text|")
+
+
+def test_build_pdf_chunks_embeds_ocr_table_text_with_metadata():
+    from app.ai.text_processor import TextProcessor
+
+    processor = TextProcessor()
+    page_documents = [
+        {
+            "page_number": 3,
+            "native_text": "",
+            "ocr_text": "",
+            "tables": [
+                {
+                    "content_type": "table",
+                    "page_number": 3,
+                    "header": ["Column1", "Column2", "Column3"],
+                    "rows": [["Value1", "Value2", "Value3"]],
+                    "table_text": "Column1 | Column2 | Column3\nValue1 | Value2 | Value3",
+                    "confidence": 0.91,
+                    "source": "ppstructure",
+                }
+            ],
+            "diagrams": [],
+        }
+    ]
+
+    chunks = processor.build_pdf_chunks(page_documents, "scan.pdf")
+
+    assert len(chunks) == 1
+    assert chunks[0]["text"] == "Column1 | Column2 | Column3\nValue1 | Value2 | Value3"
+    assert chunks[0]["metadata"]["content_type"] == "table"
+    assert chunks[0]["metadata"]["table_text"] == chunks[0]["text"]
+    assert chunks[0]["metadata"]["page_number"] == 3
+    assert chunks[0]["metadata"]["table_confidence"] == 0.91
+    assert chunks[0]["metadata"]["table_source"] == "ppstructure"
+
+
+def test_build_pdf_chunks_splits_long_ocr_page_by_sections_and_steps():
+    from app.ai.text_processor import TextProcessor
+
+    processor = TextProcessor()
+    procedure_lines = [
+        "ACME HYDRAULIC MANUAL",
+        "4.4 REASSEMBLING",
+        "1. Clean the traction sleeve and inspect the bore for scoring before installing the bearing.",
+        "2. Apply approved grease to the adjuster nut threads and verify free movement through the full range.",
+        "3. Install the ball bearing on the adjuster nut and seat the assembly squarely in the sleeve.",
+        "4. Tighten the lock screw until the tab washer is secure, then check that no burrs contact the tube.",
+        "5. Record the measured end float and compare it with the service limit in the inspection table.",
+        "4.5 TESTING ON TEST RACK",
+        "1. Mount the unit on the test rack and connect the pressure line to the calibrated supply.",
+        "2. Increase pressure in three stages while checking for leakage around the barrel and end cap.",
+        "3. Hold final pressure for five minutes and record the observed drop on the inspection sheet.",
+    ]
+    ocr_text = "\n".join(
+        f"{line} Pass {cycle}."
+        for cycle in range(1, 9)
+        for line in procedure_lines
+    )
+    page_documents = [
+        {
+            "page_number": 7,
+            "native_text": "",
+            "ocr_text": ocr_text,
+            "tables": [],
+            "diagrams": [],
+        }
+    ]
+
+    chunks = processor.build_pdf_chunks(page_documents, "manual.pdf")
+
+    assert len(chunks) > 1
+    assert all(chunk["metadata"]["content_type"] == "ocr" for chunk in chunks)
+    assert all(len(chunk["text"]) <= 1100 for chunk in chunks)
+    assert any("4.4 REASSEMBLING" in chunk["text"] for chunk in chunks)
+    assert any("4.5 TESTING ON TEST RACK" in chunk["text"] for chunk in chunks)
+    assert any("1. Clean the traction sleeve" in chunk["text"] for chunk in chunks)
+
+
+def test_build_pdf_chunks_removes_repeated_page_headers_from_ocr():
+    from app.ai.text_processor import TextProcessor
+
+    processor = TextProcessor()
+    page_documents = []
+    for page_number in range(1, 4):
+        page_documents.append(
+            {
+                "page_number": page_number,
+                "native_text": "",
+                "ocr_text": (
+                    "ACME HYDRAULIC MANUAL\n"
+                    "Service Division\n"
+                    f"5.{page_number} INSPECTION\n"
+                    "Check the bore diameter and record the result.\n"
+                    "Inspect sealing faces for scratches or corrosion.\n"
+                    "Replace damaged washers before final assembly.\n"
+                    f"Page {page_number}\n"
+                ),
+                "tables": [],
+                "diagrams": [],
+            }
+        )
+
+    chunks = processor.build_pdf_chunks(page_documents, "manual.pdf")
+    combined = "\n".join(chunk["text"] for chunk in chunks)
+
+    assert "ACME HYDRAULIC MANUAL" not in combined
+    assert "Service Division" not in combined
+    assert "INSPECTION" in combined

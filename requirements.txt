@@ -30,7 +30,6 @@ opencv-python-headless
 pytesseract
 paddlepaddle
 paddleocr
-camelot-py
 pdfplumber
 docling
 

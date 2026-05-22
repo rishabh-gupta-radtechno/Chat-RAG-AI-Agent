@@ -149,6 +149,13 @@ async def sync_embeddings(
         if not file_obj or file_obj.uploaded_by != user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
+        
+        logger.info(
+            "sync_embeddings starting file_id=%s filepath=%s filename=%s",
+            file_uuid,
+            file_obj.filepath,
+            file_obj.filename,
+        )
         # Process embeddings
         rag_pipeline = RAGPipeline()
         await rag_pipeline.initialize()
@@ -159,6 +166,7 @@ async def sync_embeddings(
             filename=file_obj.filename,
             user_id=user_id,
         )
+        logger.info(f"DEBUG: sync_embeddings completed chunks_created={chunks_created} file_id={file_uuid}")
 
         # Mark file as embedded
         await file_service.mark_as_embedded(file_uuid)

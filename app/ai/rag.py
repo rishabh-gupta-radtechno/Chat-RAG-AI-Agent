@@ -78,6 +78,28 @@ class RAGPipeline:
                     len(page_documents),
                     len(chunks),
                 )
+                logger.info("DEBUG: PDF page extraction details")
+                for page in page_documents:
+                    logger.info(
+                        f"DEBUG: page={page.get('page_number')} native_text_len={len(page.get('native_text', ''))} "
+                        f"ocr_text_len={len(page.get('ocr_text', ''))} tables={len(page.get('tables', []))} "
+                        f"diagrams={len(page.get('diagrams', []))}"
+                    )
+                    if page.get('diagrams'):
+                        for diagram in page['diagrams']:
+                            logger.info(
+                                f"DEBUG: diagram image_index={diagram.get('image_index')} "
+                                f"image_url={diagram.get('image_url')} "
+                                f"description={diagram.get('description')[:120]!r}"
+                            )
+                logger.info(f"DEBUG: PDF chunks created: {len(chunks)}")
+                for idx, chunk in enumerate(chunks, start=1):
+                    metadata = chunk.get('metadata', {})
+                    logger.info(
+                        f"DEBUG: chunk {idx}: page={metadata.get('page_number')} "
+                        f"type={metadata.get('content_type')} id={metadata.get('chunk_id')} "
+                        f"len={len(chunk['text'])} text={chunk['text'][:200]!r}"
+                    )
             else:
                 with open(filepath, "r", encoding="utf-8") as f:
                     text = f.read()
@@ -103,10 +125,21 @@ class RAGPipeline:
             seen_chunk_ids: set[str] = set()
             for i, chunk in enumerate(chunks):
                 try:
+                    metadata = chunk.get("metadata", {})
+                    logger.info(
+                        f"DEBUG: Embedding chunk {i} id={metadata.get('chunk_id')} "
+                        f"page={metadata.get('page_number')} type={metadata.get('content_type')} "
+                        f"len={len(chunk.get('text', ''))}"
+                    )
+                    logger.info(f"DEBUG: text={chunk.get('text', '')[:200]!r}")
                     if settings.use_local_embeddings:
                         embedding = self._embed_locally(chunk["text"])
                     else:
                         embedding = await self.llm_client.embed(chunk["text"])
+                    logger.info(
+                        f"DEBUG: Generated embedding vector for chunk {i} "
+                        f"id={metadata.get('chunk_id')} length={len(embedding)}"
+                    )
                     metadata = chunk.get("metadata", {})
                     metadata["file_id"] = str(file_id)
                     if user_id:
@@ -138,6 +171,7 @@ class RAGPipeline:
             if vectors:
                 await self.vector_db.upsert_vectors(vectors)
                 logger.info(f"Upserted {len(vectors)} vectors")
+                logger.info(f"DEBUG: Upserted {len(vectors)} vectors for file={file_id} file_name={filename}")
 
             return len(vectors)
 
