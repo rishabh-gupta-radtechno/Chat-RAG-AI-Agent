@@ -14,8 +14,10 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 class UserRegisterRequest(BaseModel):
     """User registration request schema."""
 
+    name: str = Field(..., min_length=1, max_length=255)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=100)
+    is_active: bool = Field(default=True)
 
 
 class UserLoginRequest(BaseModel):
@@ -23,6 +25,13 @@ class UserLoginRequest(BaseModel):
 
     email: EmailStr
     password: str
+
+class UserUpdateRequest(BaseModel):
+    """User update request schema for partial updates."""
+
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    email: Optional[EmailStr] = None
+    is_active: Optional[bool] = None
 
 
 class TokenResponse(BaseModel):
@@ -39,6 +48,7 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    name: Optional[str] = None
     email: str
     is_active: bool
     created_at: datetime

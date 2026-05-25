@@ -15,7 +15,7 @@ from app.core.security import (
 )
 from app.models import User
 from app.repositories.user import UserRepository
-from app.schemas import TokenResponse, UserResponse
+from app.schemas import TokenResponse, UserResponse, UserUpdateRequest
 
 
 class AuthService:
@@ -25,7 +25,7 @@ class AuthService:
         self.session = session
         self.user_repo = UserRepository(session)
 
-    async def register(self, email: str, password: str) -> UserResponse:
+    async def register(self, email: str, password: str, name: str, is_active: bool = True) -> UserResponse:
         """Register a new user."""
         # Check if user already exists
         existing_user = await self.user_repo.get_by_email(email)
@@ -37,8 +37,11 @@ class AuthService:
 
         # Create user
         user = await self.user_repo.create(
+            name=name,
             email=email,
             password_hash=password_hash,
+            is_active=is_active,
+            is_deleted=False,
         )
         await self.user_repo.commit()
 
@@ -68,6 +71,17 @@ class AuthService:
             refresh_token=refresh_token,
         )
 
+    async def update_user(self, user_id: uuid.UUID, update_in: UserUpdateRequest) -> Optional[UserResponse]:
+        """Update user details selectively."""
+        update_data = update_in.model_dump(exclude_unset=True)
+        
+        user = await self.user_repo.update(user_id, **update_data)
+        if not user:
+            return None
+            
+        await self.user_repo.commit()
+        return UserResponse.model_validate(user)
+
     async def get_user_by_id(self, user_id: uuid.UUID) -> Optional[UserResponse]:
         """Get user by ID."""
         user = await self.user_repo.get_by_id(user_id)
@@ -75,9 +89,26 @@ class AuthService:
             return None
         return UserResponse.model_validate(user)
 
+    async def get_all_users(self, skip: int = 0, limit: int = 100) -> list[UserResponse]:
+        """Get all users."""
+        users = await self.user_repo.get_all(skip=skip, limit=limit)
+        return [UserResponse.model_validate(user) for user in users]
+
     async def get_user_by_email(self, email: str) -> Optional[UserResponse]:
         """Get user by email."""
         user = await self.user_repo.get_by_email(email)
         if not user:
             return None
         return UserResponse.model_validate(user)
+
+    async def delete_user(self, user_id: uuid.UUID) -> bool:
+        """Delete user (soft delete)."""
+        user = await self.user_repo.get_by_id(user_id)
+        if not user:
+            return False
+
+        # Soft delete by setting is_deleted to True and is_active to False
+        # This ensures the user is hidden from lists and lookups
+        await self.user_repo.update(user_id, is_deleted=True, is_active=False)
+        await self.user_repo.commit()
+        return True

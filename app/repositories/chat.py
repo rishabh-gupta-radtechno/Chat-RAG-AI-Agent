@@ -9,7 +9,7 @@ from typing import Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ChatHistory
+from app.models import ChatHistory, User
 from app.repositories.base import BaseRepository
 
 
@@ -47,6 +47,22 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
         )
         result = await self.session.execute(stmt)
         return result.scalars().all()
+    
+    async def get_by_conversation_history(
+        self,
+        conversation_id: uuid.UUID,
+        limit: int = 100,
+    ) -> list[ChatHistory]:
+        """Get ordered chat turns for a conversation."""
+        stmt = (
+            select(ChatHistory)
+            .where(ChatHistory.conversation_id == conversation_id)
+            .order_by(ChatHistory.created_at.asc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+ 
 
     async def get_recent_by_conversation(
         self,
@@ -114,3 +130,50 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
             sources=sources_json,
             model=model or "",
         )
+
+    async def list_all_conversations(
+        self,
+        limit: int = 100,
+    ) -> list[any]:
+        """Get latest turn for each conversation across all users with metadata."""
+        # Subquery for the start date of each conversation
+        start_dates = (
+            select(
+                ChatHistory.conversation_id,
+                func.min(ChatHistory.created_at).label("start_date"),
+            )
+            .group_by(ChatHistory.conversation_id)
+            .subquery()
+        )
+ 
+        # Get the latest message timestamp for each conversation
+        latest_per_conversation = (
+            select(
+                ChatHistory.conversation_id,
+                func.max(ChatHistory.created_at).label("latest_created_at"),
+            )
+            .group_by(ChatHistory.conversation_id)
+            .subquery()
+        )
+ 
+        stmt = (
+            select(
+                ChatHistory,
+                User.name,
+                start_dates.c.start_date,
+            )
+            .join(User, ChatHistory.user_id == User.id)
+            .join(
+                latest_per_conversation,
+                (ChatHistory.conversation_id == latest_per_conversation.c.conversation_id)
+                & (ChatHistory.created_at == latest_per_conversation.c.latest_created_at),
+            )
+            .join(
+                start_dates,
+                ChatHistory.conversation_id == start_dates.c.conversation_id,
+            )
+            .order_by(ChatHistory.created_at.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return result.all()

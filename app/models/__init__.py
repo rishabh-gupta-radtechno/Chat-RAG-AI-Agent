@@ -22,9 +22,11 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -33,7 +35,6 @@ class User(Base):
     )
 
     # Relationships
-    files: Mapped[list["File"]] = relationship("File", back_populates="user", cascade="all, delete-orphan")
     chat_histories: Mapped[list["ChatHistory"]] = relationship("ChatHistory", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
@@ -52,7 +53,7 @@ class File(Base):
     file_type: Mapped[str] = mapped_column(String(50))  # pdf, txt, docx, etc.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_embedded: Mapped[bool] = mapped_column(Boolean, default=False)
-    uploaded_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    uploaded_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("admins.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -61,7 +62,7 @@ class File(Base):
     )
 
     # Relationships
-    user: Mapped["User"] = relationship("User", back_populates="files")
+    admin: Mapped["Admin"] = relationship("Admin", foreign_keys=[uploaded_by])
 
     def __repr__(self) -> str:
         return f"<File {self.filename}>"
@@ -104,6 +105,9 @@ class Admin(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+    # Relationships
+    files: Mapped[list["File"]] = relationship("File", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Admin {self.email}>"

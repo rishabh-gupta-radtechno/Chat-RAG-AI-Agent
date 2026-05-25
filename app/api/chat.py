@@ -133,3 +133,44 @@ async def get_conversation_history(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error retrieving conversation history",
         )
+
+@router.get("/chatall")
+async def list_all_user_chats(
+    limit: int = 100,
+    session: AsyncSession = Depends(get_db),
+):
+    """List conversation summaries for all users (Admin view)."""
+    try:
+        chat_service = ChatService(session)
+        return await chat_service.list_all_conversations(limit)
+    except Exception as e:
+        logger.error(f"Error listing all conversations: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error listing all conversations",
+        )
+ 
+@router.get("/conversations_history/{conversation_id}", response_model=List[ConversationTurnResponse])
+async def get_conversation_history(
+    conversation_id: str,
+    limit: int = 100,    
+    session: AsyncSession = Depends(get_db),
+):
+    """Get ordered message history for one conversation."""
+    try:
+        from app.utils.helpers import validate_uuid
+ 
+        conversation_uuid = validate_uuid(conversation_id)
+        if not conversation_uuid:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid conversation ID")
+ 
+        chat_service = ChatService(session)
+        return await chat_service.get_conversation_history_by_id(conversation_uuid, limit)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving conversation history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error retrieving conversation history",
+        )
