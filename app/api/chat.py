@@ -1,10 +1,11 @@
 """
 Chat API routes with RAG integration.
 """
+from datetime import datetime
 
-from typing import List
+from typing import List , Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user_id
@@ -137,12 +138,15 @@ async def get_conversation_history(
 @router.get("/chatall")
 async def list_all_user_chats(
     limit: int = 100,
+    user_name: Optional[str] = Query(None, description="Filter by user name"),
+    start_date: Optional[datetime] = Query(None, description="Filter by activity date (start)"),
+    end_date: Optional[datetime] = Query(None, description="Filter by activity date (end)"),
     session: AsyncSession = Depends(get_db),
 ):
     """List conversation summaries for all users (Admin view)."""
     try:
         chat_service = ChatService(session)
-        return await chat_service.list_all_conversations(limit)
+        return await chat_service.list_all_conversations(limit, user_name=user_name, start_date=start_date, end_date=end_date)
     except Exception as e:
         logger.error(f"Error listing all conversations: {e}")
         raise HTTPException(

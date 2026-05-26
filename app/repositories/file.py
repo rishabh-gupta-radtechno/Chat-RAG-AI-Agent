@@ -1,8 +1,9 @@
 """
 File repository for database access.
 """
+from datetime import datetime, time, timezone
 
-from typing import Optional
+from typing import Optional, List
 import uuid
 
 from sqlalchemy import select
@@ -18,15 +19,34 @@ class FileRepository(BaseRepository[File]):
     def __init__(self, session: AsyncSession):
         super().__init__(session, File)
 
-    async def get_by_user(self, user_id: uuid.UUID, skip: int = 0, limit: int = 100) -> list[File]:
-        """Get files uploaded by a user."""
-        stmt = (
-            select(File)
-            .where(File.uploaded_by == user_id)
-            .where(File.is_active == True)
-            .offset(skip)
-            .limit(limit)
-        )
+    async def get_by_user(
+        self, 
+        user_id: uuid.UUID, 
+        skip: int = 0, 
+        limit: int = 100,
+        filename: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> List[File]:
+        """Get files uploaded by a user with optional filtering."""
+        query = select(File).where(File.uploaded_by == user_id, File.is_active == True)
+
+        if filename:
+            query = query.where(File.filename.ilike(f"%{filename}%"))
+        
+        if start_date:
+            if start_date.tzinfo is None:
+                start_date = start_date.replace(tzinfo=timezone.utc)
+            start_date = datetime.combine(start_date.date(), time.min, tzinfo=start_date.tzinfo)
+            query = query.where(File.created_at >= start_date)
+            
+        if end_date:
+            if end_date.tzinfo is None:
+                end_date = end_date.replace(tzinfo=timezone.utc)
+            end_date = datetime.combine(end_date.date(), time.max, tzinfo=end_date.tzinfo)
+            query = query.where(File.created_at <= end_date)
+
+        stmt = query.order_by(File.created_at.desc()).offset(skip).limit(limit)
         result = await self.session.execute(stmt)
         return result.scalars().all()
 

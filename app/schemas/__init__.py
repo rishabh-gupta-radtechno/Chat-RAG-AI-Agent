@@ -18,6 +18,8 @@ class UserRegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=100)
     is_active: bool = Field(default=True)
+    department: Optional[str] = Field(None, max_length=255)
+    mobile: Optional[int] = None
 
 
 class UserLoginRequest(BaseModel):
@@ -32,6 +34,8 @@ class UserUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     email: Optional[EmailStr] = None
     is_active: Optional[bool] = None
+    department: Optional[str] = Field(None, max_length=255)
+    mobile: Optional[int] = None
 
 
 class TokenResponse(BaseModel):
@@ -51,6 +55,8 @@ class UserResponse(BaseModel):
     name: Optional[str] = None
     email: str
     is_active: bool
+    department: Optional[str] = None
+    mobile: Optional[int] = None
     created_at: datetime
 
 
