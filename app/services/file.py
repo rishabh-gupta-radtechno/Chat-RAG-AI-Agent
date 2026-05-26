@@ -3,6 +3,7 @@ File upload and management service.
 """
 
 import os
+from typing import Optional
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -64,9 +65,17 @@ class FileService:
 
         return FileUploadResponse.model_validate(file)
 
-    async def get_user_files(self, user_id: uuid.UUID, skip: int = 0, limit: int = 100) -> list[FileListResponse]:
-        """Get files uploaded by user."""
-        files = await self.file_repo.get_by_user(user_id, skip, limit)
+    async def get_user_files(
+        self, 
+        user_id: uuid.UUID, 
+        skip: int = 0, 
+        limit: int = 100,
+        filename: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> list[FileListResponse]:
+        """Get files uploaded by user with optional filtering."""
+        files = await self.file_repo.get_by_user(user_id, skip, limit, filename, start_date, end_date)
         return [FileListResponse.model_validate(f) for f in files]
 
     async def get_file(self, file_id: uuid.UUID) -> File | None:

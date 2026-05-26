@@ -1,6 +1,7 @@
 """
 Chat and RAG service with LLM integration.
 """
+from datetime import datetime
 
 import json
 import uuid
@@ -243,9 +244,12 @@ Retrieved context:
     async def list_all_conversations(
         self,
         limit: int = 100,
+        user_name: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
     ) -> list[dict]:
         """List all conversation summaries across the system (all users)."""
-        rows = await self.chat_repo.list_all_conversations(limit)
+        rows = await self.chat_repo.list_all_conversations(limit, user_name=user_name, start_date=start_date, end_date=end_date)
         return [
             {
                 "user": {

@@ -1,6 +1,7 @@
 """
 Chat history repository for database access.
 """
+from datetime import datetime, time, timezone
 
 import json
 import uuid
@@ -134,6 +135,9 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
     async def list_all_conversations(
         self,
         limit: int = 100,
+        user_name: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
     ) -> list[any]:
         """Get latest turn for each conversation across all users with metadata."""
         # Subquery for the start date of each conversation
@@ -172,8 +176,22 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
                 start_dates,
                 ChatHistory.conversation_id == start_dates.c.conversation_id,
             )
-            .order_by(ChatHistory.created_at.desc())
-            .limit(limit)
         )
+
+        if user_name:
+            stmt = stmt.where(User.name.ilike(f"%{user_name}%"))
+
+        if start_date:
+            if start_date.tzinfo is None:
+                start_date = start_date.replace(tzinfo=timezone.utc)
+            start_date = datetime.combine(start_date.date(), time.min, tzinfo=start_date.tzinfo)
+            stmt = stmt.where(ChatHistory.created_at >= start_date)
+        if end_date:
+            if end_date.tzinfo is None:
+                end_date = end_date.replace(tzinfo=timezone.utc)
+            end_date = datetime.combine(end_date.date(), time.max, tzinfo=end_date.tzinfo)
+            stmt = stmt.where(ChatHistory.created_at <= end_date)
+
+        stmt = stmt.order_by(ChatHistory.created_at.desc()).limit(limit)
         result = await self.session.execute(stmt)
         return result.all()

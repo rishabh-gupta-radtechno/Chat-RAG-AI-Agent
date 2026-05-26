@@ -2,10 +2,11 @@
 Database models for the application.
 """
 
+from typing import Optional
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, UUID, Boolean, ForeignKey
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -27,6 +28,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    department: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    mobile: Mapped[Optional[int]] = mapped_column(BigInteger, unique=True, index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
