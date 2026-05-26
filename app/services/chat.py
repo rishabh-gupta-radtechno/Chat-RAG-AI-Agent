@@ -239,3 +239,53 @@ Retrieved context:
             )
             for history in histories
         ]
+
+    async def list_all_conversations(
+        self,
+        limit: int = 100,
+    ) -> list[dict]:
+        """List all conversation summaries across the system (all users)."""
+        rows = await self.chat_repo.list_all_conversations(limit)
+        return [
+            {
+                "user": {
+                    "id": row.ChatHistory.user_id,
+                    "name": row.name,
+                },
+                "conversation_id": row.ChatHistory.conversation_id,
+                "conversation_title": row.ChatHistory.question[:50] + "..." if len(row.ChatHistory.question) > 50 else row.ChatHistory.question,
+                "last_question": row.ChatHistory.question,
+                "last_answer": row.ChatHistory.answer,
+                "model": row.ChatHistory.model,
+                "startdate": row.start_date,
+                "last_activity": row.ChatHistory.created_at,
+            }
+            for row in rows
+        ]
+ 
+    async def get_conversation_history_by_id(
+        self,
+        conversation_id: uuid.UUID,
+        limit: int = 100,
+    ) -> list[ConversationTurnResponse]:
+        """Get ordered turns for a conversation."""
+        histories = await self.chat_repo.get_by_conversation_history(conversation_id, limit)
+        result = []
+        for history in histories:
+            try:
+                sources = json.loads(history.sources) if history.sources else []
+            except json.JSONDecodeError:
+                sources = []
+ 
+            result.append(
+                ConversationTurnResponse(
+                    id=history.id,
+                    conversation_id=history.conversation_id,
+                    question=history.question,
+                    answer=history.answer,
+                    sources=[SourceReference(**source) for source in sources],
+                    model=history.model,
+                    created_at=history.created_at,
+                )
+            )
+        return result

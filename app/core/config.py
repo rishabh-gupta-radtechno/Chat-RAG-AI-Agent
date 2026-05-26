@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # File Upload
     upload_dir: str = "static/uploads"
-    max_upload_size: int = 52428800  # 50MB
+    max_upload_size: int = 104857600  # 100MB
 
     # Embedding
     embedding_model: str = "nomic-embed-text"
@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     cors_origins: list = [
         "http://localhost:3000",
         "http://localhost:8000",
+        "http://localhost:4200",
+        "http://radtech-001-site62.ntempurl.com",
     ]
 
     class Config:

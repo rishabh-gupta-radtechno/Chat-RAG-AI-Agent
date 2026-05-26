@@ -1,7 +1,6 @@
 """
 Pydantic schemas for request/response validation.
 """
-
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -15,8 +14,10 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 class UserRegisterRequest(BaseModel):
     """User registration request schema."""
 
+    name: str = Field(..., min_length=1, max_length=255)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=100)
+    is_active: bool = Field(default=True)
 
 
 class UserLoginRequest(BaseModel):
@@ -24,6 +25,13 @@ class UserLoginRequest(BaseModel):
 
     email: EmailStr
     password: str
+
+class UserUpdateRequest(BaseModel):
+    """User update request schema for partial updates."""
+
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    email: Optional[EmailStr] = None
+    is_active: Optional[bool] = None
 
 
 class TokenResponse(BaseModel):
@@ -40,6 +48,7 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    name: Optional[str] = None
     email: str
     is_active: bool
     created_at: datetime
@@ -195,3 +204,46 @@ class DetailedHealthResponse(BaseModel):
     vector_db: Optional[str] = None
     llm: Optional[str] = None
     errors: list[str] = []
+
+
+# ============ Admin Schemas ============
+
+
+class AdminBase(BaseModel):
+    name: str
+    email: EmailStr
+    is_enabled: bool = True
+
+
+class AdminCreate(AdminBase):
+    password: str
+
+
+class AdminUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    password: Optional[str] = None
+    is_enabled: Optional[bool] = None
+
+class AdminLoginRequest(BaseModel):
+    """Admin login request schema."""
+    email: EmailStr
+    password: str
+
+class AdminLoginResponse(BaseModel):
+    """Admin login response schema."""
+    token: str
+    name: str
+    email: EmailStr
+
+class AdminResponse(AdminBase):
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AdminDeleteResponse(BaseModel):
+    id: UUID
+    message: str = "Admin deleted successfully"
