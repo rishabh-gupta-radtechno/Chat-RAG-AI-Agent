@@ -81,6 +81,60 @@ async def create_all_tables():
                 """
             )
         )
+        # Add new columns to users table if they don't exist
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(255)")
+        )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE")
+        )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS department VARCHAR(255)")
+        )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile BIGINT")
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS ix_users_mobile
+                ON users (mobile) WHERE mobile IS NOT NULL
+                """
+            )
+        )
+        # Fix files.uploaded_by FK: drop old reference to users, add reference to admins
+        await conn.execute(
+            text(
+                """
+                DO $$
+                DECLARE
+                    v_constraint TEXT;
+                BEGIN
+                    SELECT tc.constraint_name INTO v_constraint
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                        ON tc.constraint_name = kcu.constraint_name
+                        AND tc.table_schema = kcu.table_schema
+                    JOIN information_schema.referential_constraints rc
+                        ON tc.constraint_name = rc.constraint_name
+                        AND tc.table_schema = rc.constraint_schema
+                    JOIN information_schema.table_constraints tc2
+                        ON rc.unique_constraint_name = tc2.constraint_name
+                        AND rc.unique_constraint_schema = tc2.table_schema
+                    WHERE tc.table_name = 'files'
+                        AND tc.constraint_type = 'FOREIGN KEY'
+                        AND kcu.column_name = 'uploaded_by'
+                        AND tc2.table_name = 'users';
+
+                    IF v_constraint IS NOT NULL THEN
+                        EXECUTE 'ALTER TABLE files DROP CONSTRAINT ' || quote_ident(v_constraint);
+                        ALTER TABLE files ADD CONSTRAINT files_uploaded_by_fkey
+                            FOREIGN KEY (uploaded_by) REFERENCES admins(id);
+                    END IF;
+                END $$
+                """
+            )
+        )
 
 
 async def drop_all_tables():
