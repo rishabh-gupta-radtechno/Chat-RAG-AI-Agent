@@ -1,18 +1,27 @@
 """
 Vector database (Qdrant) client and operations.
+Supports dense-only and hybrid dense+sparse (BGE-M3 / SPLADE) collections
+with Reciprocal Rank Fusion (RRF) for multilingual retrieval.
 """
 
 import re
 from typing import Optional
 
-from qdrant_client import QdrantClient, AsyncQdrantClient
+from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
     FilterSelector,
+    HnswConfigDiff,
     MatchValue,
+    OptimizersConfigDiff,
+    PayloadSchemaType,
     PointStruct,
+    Range,
+    SparseIndexParams,
+    SparseVector,
+    SparseVectorParams,
     VectorParams,
 )
 
@@ -22,58 +31,158 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
+# Sparse vector dimension is token-vocabulary-sized for BGE-M3 (30522 tokens)
+_SPARSE_VECTOR_NAME = "sparse"
+_DENSE_VECTOR_NAME = "dense"
+
 
 class VectorDBClient:
-    """Qdrant vector database client."""
+    """Qdrant vector database client with hybrid search support."""
 
     def __init__(self):
         self.client = AsyncQdrantClient(url=settings.qdrant_url)
         self.collection_name = "documents"
-        self.vector_size = settings.embedding_dimension
+        # BGE-M3 uses 1024-dim dense vectors; legacy Ollama models use 768-dim.
+        self.vector_size = 1024 if settings.use_bge_m3_embeddings else settings.embedding_dimension
+        self._use_sparse = settings.use_bge_m3_embeddings or settings.enable_sparse_vectors
 
     async def initialize(self):
-        """Initialize vector database with collection."""
+        """Initialize vector database collection."""
         try:
-            # Check if collection exists
             collections = await self.client.get_collections()
             collection_names = [c.name for c in collections.collections]
 
             if self.collection_name not in collection_names:
-                logger.info(f"Creating collection: {self.collection_name}")
-                await self.client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=VectorParams(
-                        size=self.vector_size,
-                        distance=Distance.COSINE,
-                    ),
-                )
-                logger.info(f"Collection created: {self.collection_name}")
+                await self._create_collection()
             else:
-                logger.info(f"Collection already exists: {self.collection_name}")
+                logger.info("Collection already exists: %s", self.collection_name)
+                await self._ensure_payload_indexes()
 
         except Exception as e:
-            logger.error(f"Error initializing vector database: {e}")
+            logger.error("Error initializing vector database: %s", e)
             raise
 
-    async def upsert_vectors(
-        self,
-        vectors: list[dict],
-    ) -> bool:
-        """Upsert vectors to the collection."""
+    async def _create_collection(self):
+        """Create collection with HNSW tuning and optional sparse vector support."""
+        logger.info("Creating collection: %s (sparse=%s)", self.collection_name, self._use_sparse)
+
+        hnsw_config = HnswConfigDiff(
+            m=32,               # Higher than default 16 — better recall for multilingual RAG
+            ef_construct=200,   # Better index quality at ingestion time
+            full_scan_threshold=10_000,
+            max_indexing_threads=0,  # 0 = auto
+            on_disk=False,
+        )
+
+        if self._use_sparse:
+            # Hybrid collection: named dense vector + sparse vector
+            await self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config={
+                    _DENSE_VECTOR_NAME: VectorParams(
+                        size=self.vector_size,
+                        distance=Distance.COSINE,
+                        hnsw_config=hnsw_config,
+                    )
+                },
+                sparse_vectors_config={
+                    _SPARSE_VECTOR_NAME: SparseVectorParams(
+                        index=SparseIndexParams(on_disk=False)
+                    )
+                },
+                optimizers_config=OptimizersConfigDiff(
+                    indexing_threshold=20_000,
+                    default_segment_number=4,
+                ),
+                on_disk_payload=False,
+            )
+        else:
+            # Dense-only collection (legacy / Ollama embeddings)
+            await self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=self.vector_size,
+                    distance=Distance.COSINE,
+                    hnsw_config=hnsw_config,
+                ),
+                optimizers_config=OptimizersConfigDiff(
+                    indexing_threshold=20_000,
+                    default_segment_number=4,
+                ),
+                on_disk_payload=False,
+            )
+
+        logger.info("Collection created: %s", self.collection_name)
+        await self._ensure_payload_indexes()
+
+    async def _ensure_payload_indexes(self):
+        """Create payload field indexes for fast metadata filtering."""
+        index_fields = [
+            ("user_id", PayloadSchemaType.KEYWORD),
+            ("file_id", PayloadSchemaType.KEYWORD),
+            ("language", PayloadSchemaType.KEYWORD),
+            ("script", PayloadSchemaType.KEYWORD),
+            ("content_type", PayloadSchemaType.KEYWORD),
+            ("has_table", PayloadSchemaType.BOOL),
+            ("page_number", PayloadSchemaType.INTEGER),
+            ("ocr_confidence", PayloadSchemaType.FLOAT),
+        ]
+        for field, schema_type in index_fields:
+            try:
+                await self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field,
+                    field_schema=schema_type,
+                )
+            except Exception:
+                # Index may already exist — safe to ignore
+                pass
+
+    async def upsert_vectors(self, vectors: list[dict]) -> bool:
+        """Upsert vectors (dense-only or dense+sparse) to the collection."""
         try:
             points_by_id: dict[str, PointStruct] = {}
+
             for v in vectors:
                 point_id = v.get("id")
                 if not point_id:
                     continue
                 if point_id in points_by_id:
-                    logger.warning(f"Duplicate vector id detected and skipped: {point_id}")
+                    logger.warning("Duplicate vector id skipped: %s", point_id)
                     continue
-                points_by_id[point_id] = PointStruct(
-                    id=point_id,
-                    vector=v["embedding"],
-                    payload=v["metadata"],
-                )
+
+                embedding = v["embedding"]
+                sparse = v.get("sparse_embedding")  # dict with 'indices' and 'values'
+
+                if self._use_sparse and sparse and isinstance(embedding, list):
+                    # Hybrid point: named dense + sparse vectors
+                    point = PointStruct(
+                        id=point_id,
+                        vector={
+                            _DENSE_VECTOR_NAME: embedding,
+                            _SPARSE_VECTOR_NAME: SparseVector(
+                                indices=sparse["indices"],
+                                values=sparse["values"],
+                            ),
+                        },
+                        payload=v["metadata"],
+                    )
+                elif self._use_sparse and isinstance(embedding, list):
+                    # Hybrid collection but no sparse provided — store dense only
+                    point = PointStruct(
+                        id=point_id,
+                        vector={_DENSE_VECTOR_NAME: embedding},
+                        payload=v["metadata"],
+                    )
+                else:
+                    # Legacy dense-only collection
+                    point = PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload=v["metadata"],
+                    )
+
+                points_by_id[point_id] = point
 
             points = list(points_by_id.values())
             if not points:
@@ -84,12 +193,11 @@ class VectorDBClient:
                 collection_name=self.collection_name,
                 points=points,
             )
-
-            logger.info(f"Upserted {len(points)} vectors")
+            logger.info("Upserted %d vectors", len(points))
             return True
 
         except Exception as e:
-            logger.error(f"Error upserting vectors: {e}")
+            logger.error("Error upserting vectors: %s", e)
             raise
 
     async def search(
@@ -98,11 +206,28 @@ class VectorDBClient:
         top_k: int = 5,
         threshold: float = 0.5,
         user_id: Optional[str] = None,
+        min_ocr_confidence: Optional[float] = None,
     ) -> list[dict]:
-        """Search for similar vectors."""
+        """Dense vector similarity search."""
         try:
-            query_filter = self._user_filter(user_id)
-            if hasattr(self.client, "query_points"):
+            query_filter = self._build_filter(
+                user_id=user_id,
+                min_ocr_confidence=min_ocr_confidence,
+            )
+
+            if self._use_sparse:
+                # Named vector query for hybrid collections
+                response = await self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_embedding,
+                    using=_DENSE_VECTOR_NAME,
+                    limit=top_k,
+                    score_threshold=threshold,
+                    query_filter=query_filter,
+                    with_payload=True,
+                )
+                results = response.points
+            elif hasattr(self.client, "query_points"):
                 response = await self.client.query_points(
                     collection_name=self.collection_name,
                     query=query_embedding,
@@ -121,22 +246,87 @@ class VectorDBClient:
                     query_filter=query_filter,
                 )
 
-            documents = []
-            for result in results:
-                documents.append(
-                    {
-                        "id": result.id,
-                        "relevance_score": result.score,
-                        **(result.payload or {}),
-                    }
-                )
-
-            logger.info(f"Found {len(documents)} similar documents")
+            documents = [
+                {"id": r.id, "relevance_score": r.score, **(r.payload or {})}
+                for r in results
+            ]
+            logger.info("Dense search returned %d documents", len(documents))
             return documents
 
         except Exception as e:
-            logger.error(f"Error searching vectors: {e}")
+            logger.error("Error searching vectors: %s", e)
             raise
+
+    async def hybrid_search(
+        self,
+        query_dense: list[float],
+        query_sparse: dict,
+        top_k: int = 5,
+        prefetch_k: int = 50,
+        user_id: Optional[str] = None,
+        min_ocr_confidence: Optional[float] = None,
+    ) -> list[dict]:
+        """
+        Hybrid search using Qdrant's built-in Reciprocal Rank Fusion (RRF).
+        Fuses dense semantic search + BGE-M3 sparse (lexical) search.
+        Significantly improves recall for OCR-heavy and multilingual documents.
+        """
+        if not self._use_sparse:
+            # Fall back to dense-only if collection doesn't have sparse vectors
+            return await self.search(
+                query_embedding=query_dense,
+                top_k=top_k,
+                user_id=user_id,
+                min_ocr_confidence=min_ocr_confidence,
+            )
+
+        try:
+            payload_filter = self._build_filter(
+                user_id=user_id,
+                min_ocr_confidence=min_ocr_confidence,
+            )
+
+            response = await self.client.query_points(
+                collection_name=self.collection_name,
+                prefetch=[
+                    {
+                        "query": query_dense,
+                        "using": _DENSE_VECTOR_NAME,
+                        "limit": prefetch_k,
+                        "filter": payload_filter,
+                    },
+                    {
+                        "query": SparseVector(
+                            indices=query_sparse["indices"],
+                            values=query_sparse["values"],
+                        ),
+                        "using": _SPARSE_VECTOR_NAME,
+                        "limit": prefetch_k,
+                        "filter": payload_filter,
+                    },
+                ],
+                query={"fusion": "rrf"},
+                limit=top_k,
+                with_payload=True,
+            )
+
+            documents = [
+                {"id": r.id, "relevance_score": r.score, **(r.payload or {})}
+                for r in response.points
+            ]
+            logger.info("Hybrid RRF search returned %d documents", len(documents))
+            return documents
+
+        except Exception as e:
+            logger.error("Error in hybrid search: %s", e)
+            # Degrade gracefully to dense-only
+            logger.warning("Falling back to dense-only search")
+            return await self.search(
+                query_embedding=query_dense,
+                top_k=top_k,
+                user_id=user_id,
+                min_ocr_confidence=min_ocr_confidence,
+            )
 
     async def keyword_search(
         self,
@@ -144,11 +334,7 @@ class VectorDBClient:
         limit: int = 5,
         user_id: Optional[str] = None,
     ) -> list[dict]:
-        """Search payload text for exact keyword matches.
-
-        This complements vector search for manuals where section titles and
-        part names must match literally.
-        """
+        """Search payload text for exact keyword matches (complements vector search)."""
         try:
             query_terms = self._keyword_terms(query)
             if not query_terms:
@@ -171,25 +357,21 @@ class VectorDBClient:
                     chunk_text = payload.get("chunk_text") or ""
                     score = self._keyword_score(query_terms, chunk_text)
                     if score > 0:
-                        results.append({
-                            "id": point.id,
-                            "relevance_score": score,
-                            **payload,
-                        })
+                        results.append({"id": point.id, "relevance_score": score, **payload})
 
                 if offset is None:
                     break
 
             results.sort(key=lambda item: item["relevance_score"], reverse=True)
-            logger.info(f"Found {len(results)} keyword matched documents")
+            logger.info("Keyword search returned %d documents", len(results))
             return results[:limit]
 
         except Exception as e:
-            logger.error(f"Error keyword searching vectors: {e}")
+            logger.error("Error in keyword search: %s", e)
             raise
 
     async def _get_all_documents(self, user_id: Optional[str] = None) -> list[dict]:
-        """Return all point payloads for lightweight lexical retrieval."""
+        """Return all point payloads for BM25 / neighbor-context retrieval."""
         documents = []
         offset = None
 
@@ -204,10 +386,7 @@ class VectorDBClient:
             )
 
             for point in points:
-                documents.append({
-                    "id": point.id,
-                    **(point.payload or {}),
-                })
+                documents.append({"id": point.id, **(point.payload or {})})
 
             if offset is None:
                 break
@@ -230,38 +409,43 @@ class VectorDBClient:
             return []
 
         diagrams = []
-        seen = set()
+        seen: set = set()
         for document in await self._get_all_documents(user_id=user_id):
             if document.get("content_type") != "diagram":
                 continue
-
             key = (str(document.get("file_id")), document.get("page_number"))
             if key not in source_pages:
                 continue
-
             diagram_id = document.get("id")
             if diagram_id in seen:
                 continue
             seen.add(diagram_id)
             diagrams.append(document)
-
             if len(diagrams) >= limit:
                 break
 
         return diagrams
 
+    # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _build_filter(
+        user_id: Optional[str] = None,
+        min_ocr_confidence: Optional[float] = None,
+        language: Optional[str] = None,
+    ) -> Optional[Filter]:
+        must = []
+        if user_id:
+            must.append(FieldCondition(key="user_id", match=MatchValue(value=str(user_id))))
+        if min_ocr_confidence is not None:
+            must.append(FieldCondition(key="ocr_confidence", range=Range(gte=min_ocr_confidence)))
+        if language:
+            must.append(FieldCondition(key="language", match=MatchValue(value=language)))
+        return Filter(must=must) if must else None
+
     @staticmethod
     def _user_filter(user_id: Optional[str]) -> Optional[Filter]:
-        if not user_id:
-            return None
-        return Filter(
-            must=[
-                FieldCondition(
-                    key="user_id",
-                    match=MatchValue(value=str(user_id)),
-                )
-            ]
-        )
+        return VectorDBClient._build_filter(user_id=user_id)
 
     @staticmethod
     def _keyword_terms(text: str) -> list[str]:
@@ -295,11 +479,11 @@ class VectorDBClient:
         if query_phrase in normalized_text:
             score += 0.75
 
-        words = normalized_text.split()
         phrase_count = normalized_text.count(query_phrase) if query_phrase else 0
         if phrase_count:
             score += min(0.5, phrase_count * 0.1)
 
+        words = normalized_text.split()
         first_words = " ".join(words[:24])
         if query_phrase and query_phrase in first_words:
             score += 0.5
@@ -331,22 +515,17 @@ class VectorDBClient:
         """Delete all vectors for a file."""
         try:
             file_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="file_id",
-                        match=MatchValue(value=str(file_id)),
-                    )
-                ]
+                must=[FieldCondition(key="file_id", match=MatchValue(value=str(file_id)))]
             )
             await self.client.delete(
                 collection_name=self.collection_name,
                 points_selector=FilterSelector(filter=file_filter),
                 wait=True,
             )
-            logger.info(f"Deleted vectors for file: {file_id}")
+            logger.info("Deleted vectors for file: %s", file_id)
             return True
         except Exception as e:
-            logger.error(f"Error deleting vectors: {e}")
+            logger.error("Error deleting vectors: %s", e)
             raise
 
     async def health_check(self) -> bool:
@@ -355,5 +534,5 @@ class VectorDBClient:
             await self.client.get_collections()
             return True
         except Exception as e:
-            logger.error(f"Vector database health check failed: {e}")
+            logger.error("Vector database health check failed: %s", e)
             return False

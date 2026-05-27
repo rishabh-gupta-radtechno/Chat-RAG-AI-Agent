@@ -39,3 +39,10 @@ sentence-transformers
 rank-bm25
 transformers
 torch
+
+# Multilingual RAG — optional but recommended
+# BGE-M3: dense + sparse embeddings, cross-lingual, Devanagari support
+FlagEmbedding
+
+# Better Unicode/regex support for Devanagari text processing
+regex

@@ -57,9 +57,26 @@ class Settings(BaseSettings):
     pdf_chunk_size: int = 450
     pdf_chunk_overlap: int = 80
 
+    # BGE-M3 multilingual embeddings (dense + sparse, 1024-dim, cross-lingual)
+    # Set use_bge_m3_embeddings=True to enable; requires FlagEmbedding installed.
+    # When enabled, embedding_dimension is automatically treated as 1024.
+    # A new Qdrant collection with sparse vector support will be created on first run.
+    use_bge_m3_embeddings: bool = False
+    bge_m3_model: str = "BAAI/bge-m3"
+    bge_m3_device: str = "cpu"          # "cuda" for GPU acceleration
+    bge_m3_batch_size: int = 16
+
+    # Sparse vector / hybrid search (Qdrant RRF fusion)
+    enable_sparse_vectors: bool = False  # Auto-enabled when use_bge_m3_embeddings=True
+    hybrid_search_prefetch_k: int = 50  # Candidates per leg before RRF fusion
+
     # PDF Processing
-    use_docling: bool = True  # Use Docling for advanced PDF processing
+    use_docling: bool = True
     ocr_engine: str = "paddleocr"
+    # Comma-separated PaddleOCR language codes. "hi" covers Devanagari (Hindi/Marathi/Nepali)
+    # and also recognises Latin/English text in the same pass.
+    ocr_languages: str = "hi,en"
+    enable_multilingual_ocr: bool = True
     enable_diagram_captioning: bool = False
     ocr_confidence_threshold: float = 0.6
     ocr_full_page: bool = True
@@ -68,6 +85,8 @@ class Settings(BaseSettings):
     enable_bm25_search: bool = False
     enable_reranking: bool = False
     rerank_top_k: int = 10
+    # Upgraded to multilingual reranker (covers Hindi + English cross-lingual reranking)
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
     embedding_model_local: str = "sentence-transformers/all-MiniLM-L6-v2"
     use_local_embeddings: bool = False
 
@@ -77,6 +96,8 @@ class Settings(BaseSettings):
     retrieval_neighbor_pages: int = 1
     rag_context_docs: int = 6
     rag_context_max_chars: int = 8000
+    # Minimum OCR confidence for a chunk to be returned in retrieval results
+    min_ocr_confidence_for_retrieval: float = 0.55
 
     # Logging
     log_level: str = "INFO"

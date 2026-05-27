@@ -1,10 +1,12 @@
 """
 PDF extraction pipeline for native text, images, OCR, tables, and diagram descriptions.
+Supports multilingual OCR including Devanagari (Hindi/Marathi/Nepali/Sanskrit).
 """
 import io
 import threading
+import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -14,6 +16,40 @@ settings = get_settings()
 _PADDLE_OCR_INSTANCE = None
 _PADDLE_OCR_LOCK = threading.Lock()
 _PADDLE_OCR_UNAVAILABLE = False
+
+
+def detect_script(text: str) -> str:
+    """Return 'devanagari', 'mixed', or 'latin' based on character distribution."""
+    if not text:
+        return "latin"
+    devanagari = sum(1 for c in text if "ऀ" <= c <= "ॿ")
+    total_alpha = sum(1 for c in text if c.isalpha())
+    if total_alpha == 0:
+        return "latin"
+    ratio = devanagari / total_alpha
+    if ratio >= 0.6:
+        return "devanagari"
+    if ratio >= 0.15:
+        return "mixed"
+    return "latin"
+
+
+def normalize_text(text: str) -> str:
+    """
+    Unicode NFC normalization + Devanagari-specific cleanup for OCR output.
+    Removes zero-width chars and normalises whitespace.
+    """
+    if not text:
+        return text
+    # NFC composition (joins split Devanagari matras back to base characters)
+    text = unicodedata.normalize("NFC", text)
+    # Strip zero-width chars injected by some OCR engines
+    for zw in ("​", "‌", "‍", "﻿"):
+        text = text.replace(zw, "")
+    # Normalise runs of whitespace
+    import re
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 class PDFProcessor:
@@ -54,15 +90,20 @@ class PDFProcessor:
             if rendered_page:
                 ocr_inputs.extend(rendered_page)
             ocr_inputs.extend(page_images)
-            ocr_text = self._extract_ocr_text(ocr_inputs)
+            ocr_result = self._extract_ocr_text_with_meta(ocr_inputs)
             tables = self._extract_tables(filepath, page_number)
             diagrams = self._extract_diagrams(page_images, tables, file_id=file_id, page_number=page_number)
 
+            raw_native = normalize_text(native_text.strip())
+            raw_ocr = normalize_text(ocr_result["text"].strip())
+            combined = raw_native or raw_ocr
             pages.append(
                 {
                     "page_number": page_number,
-                    "native_text": native_text.strip(),
-                    "ocr_text": ocr_text.strip(),
+                    "native_text": raw_native,
+                    "ocr_text": raw_ocr,
+                    "ocr_confidence": ocr_result["confidence"],
+                    "script": detect_script(combined),
                     "tables": tables,
                     "diagrams": diagrams,
                 }
@@ -155,8 +196,15 @@ class PDFProcessor:
             if rendered_page:
                 ocr_inputs.extend(rendered_page)
             ocr_inputs.extend(page_images)
-            page["ocr_text"] = self._extract_ocr_text(ocr_inputs).strip()
-        
+            ocr_result = self._extract_ocr_text_with_meta(ocr_inputs)
+            raw_ocr = normalize_text(ocr_result["text"].strip())
+            raw_native = normalize_text(page.get("native_text", "").strip())
+            page["ocr_text"] = raw_ocr
+            page["native_text"] = raw_native
+            page["ocr_confidence"] = ocr_result["confidence"]
+            combined = raw_native or raw_ocr
+            page["script"] = detect_script(combined)
+
         logger.info("Successfully extracted %d pages using Docling", len(pages))
         return pages
 
@@ -265,50 +313,66 @@ class PDFProcessor:
         return images_by_page
 
     def _extract_ocr_text(self, images: List[Dict[str, Any]]) -> str:
+        return self._extract_ocr_text_with_meta(images)["text"]
+
+    def _extract_ocr_text_with_meta(self, images: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Return OCR text plus average confidence score across all recognised blocks."""
         if not images:
-            return ""
+            return {"text": "", "confidence": 1.0}
 
         ocr_texts: list[str] = []
+        all_confidences: list[float] = []
+
         for image in images:
             image_bytes = image.get("bytes")
             if not image_bytes:
                 continue
-            text = self._run_ocr(image_bytes)
-            if text:
-                ocr_texts.append(text)
+            result = self._run_ocr_with_confidence(image_bytes)
+            if result["text"]:
+                ocr_texts.append(result["text"])
+            all_confidences.extend(result["confidences"])
 
-        return "\n".join(ocr_texts)
+        avg_confidence = (sum(all_confidences) / len(all_confidences)) if all_confidences else 1.0
+        return {
+            "text": "\n".join(ocr_texts),
+            "confidence": round(avg_confidence, 4),
+        }
 
     def _run_ocr(self, image_bytes: bytes) -> str:
-        text = ""
+        return self._run_ocr_with_confidence(image_bytes)["text"]
 
+    def _run_ocr_with_confidence(self, image_bytes: bytes) -> Dict[str, Any]:
+        """Run OCR and return text + per-block confidence scores."""
         if self._ocr_engine == "paddleocr":
-            text = self._run_paddleocr(image_bytes)
-            if text:
-                return text
+            result = self._run_paddleocr_with_confidence(image_bytes)
+            if result["text"]:
+                return result
 
         text = self._run_tesseract(image_bytes)
         if not text:
-            logger.debug("No OCR engines available or OCR processing returned no text. Proceeding without OCR.")
-        return text
+            logger.debug("No OCR engines returned text. Proceeding without OCR.")
+        return {"text": text, "confidences": [1.0] if text else []}
 
     def _run_paddleocr(self, image_bytes: bytes) -> str:
+        return self._run_paddleocr_with_confidence(image_bytes)["text"]
+
+    def _run_paddleocr_with_confidence(self, image_bytes: bytes) -> Dict[str, Any]:
         global _PADDLE_OCR_INSTANCE, _PADDLE_OCR_UNAVAILABLE
 
         if _PADDLE_OCR_UNAVAILABLE:
-            return ""
+            return {"text": "", "confidences": []}
 
         try:
             from paddleocr import PaddleOCR
         except ImportError:
             logger.warning("PaddleOCR not installed, skipping PaddleOCR path.")
             _PADDLE_OCR_UNAVAILABLE = True
-            return ""
+            return {"text": "", "confidences": []}
         except Exception as exc:
             logger.warning("PaddleOCR import failed: %s. Falling back to Tesseract.", exc)
             _PADDLE_OCR_UNAVAILABLE = True
             self._ocr_engine = "tesseract"
-            return ""
+            return {"text": "", "confidences": []}
 
         if self._paddle_ocr is None:
             with _PADDLE_OCR_LOCK:
@@ -316,21 +380,26 @@ class PDFProcessor:
                     self._paddle_ocr = _PADDLE_OCR_INSTANCE
                 elif not _PADDLE_OCR_UNAVAILABLE:
                     try:
+                        # Use Hindi ("hi") model — PaddleOCR's Hindi model detects both
+                        # Devanagari and Latin scripts in a single pass.
+                        ocr_lang = "hi" if settings.enable_multilingual_ocr else "en"
                         _PADDLE_OCR_INSTANCE = PaddleOCR(
                             use_angle_cls=True,
-                            lang="en",
+                            lang=ocr_lang,
                             use_gpu=False,
                             use_space_char=True,
+                            show_log=False,
                         )
                         self._paddle_ocr = _PADDLE_OCR_INSTANCE
+                        logger.info("PaddleOCR initialised with lang=%s", ocr_lang)
                     except Exception as exc:
                         logger.warning("PaddleOCR initialization failed: %s. Falling back to Tesseract.", exc)
                         _PADDLE_OCR_UNAVAILABLE = True
                         self._ocr_engine = "tesseract"
-                        return ""
+                        return {"text": "", "confidences": []}
 
         if self._paddle_ocr is None:
-            return ""
+            return {"text": "", "confidences": []}
 
         image = self._prepare_image_for_ocr(image_bytes)
         try:
@@ -340,13 +409,20 @@ class PDFProcessor:
             if "PDX has already been initialized" in str(exc):
                 _PADDLE_OCR_UNAVAILABLE = True
             self._ocr_engine = "tesseract"
-            return ""
+            return {"text": "", "confidences": []}
 
-        return "\n".join(self._collect_paddle_text(results))
+        lines, confidences = self._collect_paddle_text_with_confidence(results)
+        return {"text": "\n".join(lines), "confidences": confidences}
 
     def _collect_paddle_text(self, results: Any) -> list[str]:
-        """Normalize PaddleOCR result shapes across v2/v3 releases."""
+        lines, _ = self._collect_paddle_text_with_confidence(results)
+        return lines
+
+    def _collect_paddle_text_with_confidence(self, results: Any) -> Tuple[list[str], list[float]]:
+        """Normalize PaddleOCR result shapes across v2/v3 releases.
+        Returns (text_lines, confidence_scores) for all blocks above threshold."""
         lines: list[str] = []
+        confidences: list[float] = []
 
         def walk(node: Any) -> None:
             if not node:
@@ -358,9 +434,10 @@ class PDFProcessor:
                     scores = node.get("rec_scores") or node.get("scores") or []
                     if isinstance(texts, list):
                         for index, text in enumerate(texts):
-                            confidence = scores[index] if index < len(scores) else 1.0
+                            confidence = float(scores[index]) if index < len(scores) else 1.0
                             if text and confidence >= settings.ocr_confidence_threshold:
                                 lines.append(str(text))
+                                confidences.append(confidence)
                         return
                 for value in node.values():
                     walk(value)
@@ -376,13 +453,14 @@ class PDFProcessor:
                     confidence = float(node[1][1] or 0.0)
                     if confidence >= settings.ocr_confidence_threshold:
                         lines.append(node[1][0])
+                        confidences.append(confidence)
                     return
 
                 for item in node:
                     walk(item)
 
         walk(results)
-        return lines
+        return lines, confidences
 
     def _run_tesseract(self, image_bytes: bytes) -> str:
         try:
@@ -396,7 +474,8 @@ class PDFProcessor:
             image = self._prepare_image_for_ocr(image_bytes)
             if isinstance(image, bytes):
                 image = Image.open(io.BytesIO(image))
-            return pytesseract.image_to_string(image, lang="eng")
+            tess_lang = "hin+eng" if settings.enable_multilingual_ocr else "eng"
+            return pytesseract.image_to_string(image, lang=tess_lang)
         except Exception as exc:
             logger.warning("Tesseract OCR failed: %s. Skipping OCR for this image.", exc)
             return ""
@@ -412,25 +491,32 @@ class PDFProcessor:
             if image is None:
                 raise ValueError("Unable to decode image bytes")
 
+            # Upscale low-resolution scans (critical for Devanagari matras)
+            h, w = image.shape[:2]
+            if w < 1800:
+                scale = 1800 / w
+                image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
             # Convert to grayscale
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-            # Denoise
-            denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
+            # Deskew (straighten tilted scans)
+            gray = self._deskew(gray)
 
-            # Adaptive thresholding for better binarization
-            thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            # Denoise with bilateral filter (preserves text edges better than fastNlMeans)
+            denoised = cv2.bilateralFilter(gray, 9, 75, 75)
 
-            # Upscale for better OCR
-            upscale = cv2.resize(thresh, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            # Adaptive thresholding for better binarization on uneven lighting
+            thresh = cv2.adaptiveThreshold(
+                denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+            )
 
-            return Image.fromarray(upscale)
+            return Image.fromarray(thresh)
         except Exception:
             try:
                 from PIL import Image, ImageOps, ImageFilter
 
                 image = Image.open(io.BytesIO(image_bytes)).convert("L")
-                # Apply filters
                 image = image.filter(ImageFilter.MedianFilter(size=3))
                 image = ImageOps.autocontrast(image)
                 image = image.resize((image.width * 2, image.height * 2), Image.LANCZOS)
@@ -438,6 +524,35 @@ class PDFProcessor:
             except Exception as exc:  # pragma: no cover
                 logger.warning("Fallback image preprocessing failed: %s", exc)
                 return image_bytes
+
+    @staticmethod
+    def _deskew(gray_image: Any) -> Any:
+        """Correct skew in scanned page images."""
+        try:
+            import cv2
+            import numpy as np
+
+            coords = np.column_stack(np.where(gray_image > 0))
+            if len(coords) < 5:
+                return gray_image
+            angle = cv2.minAreaRect(coords)[-1]
+            if angle < -45:
+                angle = -(90 + angle)
+            else:
+                angle = -angle
+            # Only correct small skew angles to avoid flipping portrait pages
+            if abs(angle) > 10:
+                return gray_image
+            (h, w) = gray_image.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            return cv2.warpAffine(
+                gray_image, M, (w, h),
+                flags=cv2.INTER_CUBIC,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+        except Exception:
+            return gray_image
 
     def _extract_tables(self, filepath: str, page_number: int) -> list[Dict[str, Any]]:
         tables: list[Dict[str, Any]] = []
