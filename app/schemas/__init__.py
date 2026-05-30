@@ -115,6 +115,7 @@ class SourceReference(BaseModel):
     file_id: UUID
     chunk_index: int
     relevance_score: float
+    page_number: Optional[int] = None
 
 
 class ChatRequest(BaseModel):
