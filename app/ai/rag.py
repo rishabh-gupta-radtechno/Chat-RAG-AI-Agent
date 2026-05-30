@@ -39,38 +39,44 @@ class RAGPipeline:
     ) -> int:
         """Process and embed a document."""
         try:
-            # Extract text
+            # Build list of (page_number_or_None, text) segments
             if filepath.endswith(".pdf"):
-                text = self.text_processor.extract_text_from_pdf(filepath)
+                page_segments = self.text_processor.extract_text_from_pdf(filepath)
+                logger.info(f"Extracted {len(page_segments)} pages from {filename}")
             else:
                 with open(filepath, "r", encoding="utf-8") as f:
-                    text = f.read()
+                    raw = f.read()
+                page_segments = [(None, raw)]
 
-            logger.info(f"Extracted {len(text)} characters from {filename}")
+            # Chunk each segment and track page number
+            chunk_records: list[tuple[int | None, str]] = []
+            for page_number, raw_text in page_segments:
+                cleaned = self.text_processor.clean_text(raw_text)
+                for chunk in self.text_processor.chunk_by_sentences(cleaned):
+                    chunk_records.append((page_number, chunk))
 
-            # Clean text
-            text = self.text_processor.clean_text(text)
-
-            # Chunk text
-            chunks = self.text_processor.chunk_by_sentences(text)
-            logger.info(f"Created {len(chunks)} chunks")
+            logger.info(f"Created {len(chunk_records)} chunks")
 
             # Generate embeddings and upsert
             vectors = []
-            for i, chunk in enumerate(chunks):
+            for i, (page_number, chunk) in enumerate(chunk_records):
                 try:
                     embedding = await self.llm_client.embed(chunk)
+
+                    metadata = {
+                        "file_id": str(file_id),
+                        "filename": filename,
+                        "chunk_index": i,
+                        "chunk_text": chunk,
+                        "chunk_size": len(chunk),
+                    }
+                    if page_number is not None:
+                        metadata["page_number"] = page_number
 
                     vectors.append({
                         "id": str(uuid.uuid5(file_id, str(i))),
                         "embedding": embedding,
-                        "metadata": {
-                            "file_id": str(file_id),
-                            "filename": filename,
-                            "chunk_index": i,
-                            "chunk_text": chunk,
-                            "chunk_size": len(chunk),
-                        },
+                        "metadata": metadata,
                     })
                 except Exception as e:
                     logger.warning(f"Error embedding chunk {i}: {e}")

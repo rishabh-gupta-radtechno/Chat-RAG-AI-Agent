@@ -90,6 +90,7 @@ class ChatService:
                     file_id=uuid.UUID(doc.get("file_id", "00000000-0000-0000-0000-000000000000")),
                     chunk_index=doc.get("chunk_index", 0),
                     relevance_score=doc.get("relevance_score", 0.0),
+                    page_number=doc.get("page_number"),
                 )
                 for doc in documents
             ]
