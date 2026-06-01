@@ -134,7 +134,6 @@ class DiagramReference(BaseModel):
     relevance_score: float = 0.0
 
 
-
 class ChatRequest(BaseModel):
     """Chat request schema."""
 

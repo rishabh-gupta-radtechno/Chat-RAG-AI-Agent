@@ -103,7 +103,6 @@ class ChatService:
                     document_page_number=doc.get("document_page_number"),
                     content_type=doc.get("content_type"),
                     excerpt=self._excerpt(doc.get("chunk_text", "")),
-                    page_number=doc.get("page_number"),
                 )
                 for doc in documents
             ]
@@ -501,6 +500,7 @@ Related diagrams:
                 return True
 
         return False
+    
     async def list_all_conversations(
         self,
         limit: int = 100,
