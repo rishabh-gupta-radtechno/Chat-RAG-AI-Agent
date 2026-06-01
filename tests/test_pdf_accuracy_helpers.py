@@ -44,3 +44,15 @@ def test_collect_paddle_text_supports_dict_ocr_shape():
     }
 
     assert processor._collect_paddle_text(results) == ["First", "Second"]
+
+
+def test_iter_docling_pages_handles_dict_like_page_map():
+    processor = PDFProcessor()
+
+    class FakeDoc:
+        def __init__(self):
+            self.pages = {1: "first page", 2: "second page"}
+
+    page_items = processor._iter_docling_pages(FakeDoc())
+
+    assert page_items == [(1, "first page"), (2, "second page")]

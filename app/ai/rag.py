@@ -108,35 +108,42 @@ class RAGPipeline:
                         embedding = self._embed_locally(chunk["text"])
                     else:
                         embedding = await self.llm_client.embed(chunk["text"])
-                    metadata = chunk.get("metadata", {})
-                    metadata["file_id"] = str(file_id)
+                    chunk_metadata = chunk.get("metadata", {}).copy()
+                    chunk_metadata["file_id"] = str(file_id)
                     if user_id:
-                        metadata["user_id"] = str(user_id)
-                    metadata["filename"] = filename
-                    metadata["chunk_index"] = i
-                    metadata["chunk_size"] = len(chunk["text"])
-                    metadata["chunk_text"] = chunk["text"]
-
-                    chunk_id = metadata.get("chunk_id")
+                        chunk_metadata["user_id"] = str(user_id)
+                    chunk_metadata["filename"] = filename
+                    chunk_metadata["chunk_index"] = i
+                    chunk_metadata["chunk_size"] = len(chunk["text"])
+                    chunk_metadata["chunk_text"] = chunk["text"]
+ 
+                    page_number = chunk_metadata.get("page_number")
+                    content_type = chunk_metadata.get("content_type", "text")
+                    chunk_id = chunk_metadata.get("chunk_id")
                     if not chunk_id:
-                        chunk_id = f"{filename}|page{metadata.get('page_number', 0)}|{metadata.get('content_type', 'text')}|{i:03d}"
-                        metadata["chunk_id"] = chunk_id
-
+                        chunk_id = f"{filename}|page{page_number or 0}|{content_type}|{i:03d}"
+                        chunk_metadata["chunk_id"] = chunk_id
+ 
                     if chunk_id in seen_chunk_ids:
                         logger.warning(f"Skipping duplicate chunk id while embedding: {chunk_id}")
                         continue
                     seen_chunk_ids.add(chunk_id)
-
+ 
                     metadata = {
                         "file_id": str(file_id),
                         "filename": filename,
                         "chunk_index": i,
-                        "chunk_text": chunk,
-                        "chunk_size": len(chunk),
+                        "chunk_text": chunk["text"],
+                        "chunk_size": len(chunk["text"]),
                     }
                     if page_number is not None:
                         metadata["page_number"] = page_number
-
+                    if content_type:
+                        metadata["content_type"] = content_type
+                    metadata["chunk_id"] = chunk_id
+                    if user_id:
+                        metadata["user_id"] = str(user_id)
+ 
                     vectors.append({
                         "id": str(uuid.uuid5(file_id, chunk_id)),
                         "embedding": embedding,

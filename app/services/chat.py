@@ -74,12 +74,12 @@ class ChatService:
 
             retrieval_query = self._build_retrieval_query(message, history)
 
-            # Retrieve relevant documents
-            documents = await self.rag_pipeline.retrieve(retrieval_query, user_id=user_id)
+            # Retrieve relevant documents from all embedded files (not user-scoped)
+            documents = await self.rag_pipeline.retrieve(retrieval_query, user_id=None)
             logger.info(f"Retrieved {len(documents)} documents")
             diagrams = await self.rag_pipeline.vector_db.get_diagrams_for_sources(
                 documents,
-                user_id=str(user_id),
+                user_id=None,
             )
             logger.info(f"Retrieved {len(diagrams)} related diagrams")
 

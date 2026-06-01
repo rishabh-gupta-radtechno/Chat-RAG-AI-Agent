@@ -105,47 +105,60 @@ class PDFProcessor:
         images_by_page = self._extract_page_images(filepath)
         native_pages_by_number: dict[int, str] = {}
         pages: list[Dict[str, Any]] = []
-        
-        for page_number, page in enumerate(doc.pages, start=1):
-            # Extract text content
-            text_items = []
-            for item in page.get_text_items():
-                text_items.append(item.text)
-            native_text = " ".join(text_items)
-            native_pages_by_number[page_number] = native_text
-            
-            # Extract tables
-            tables = []
-            for table in page.tables:
-                # Convert Docling table to our format
-                header = []
-                rows = []
-                
-                if table.data:
-                    # First row as header if it exists
-                    if len(table.data) > 0:
-                        header = [str(cell) for cell in table.data[0]]
-                        rows = [[str(cell) for cell in row] for row in table.data[1:]]
-                    
-                    tables.append({
-                        "title": f"Page {page_number} table {len(tables) + 1}",
-                        "header": header,
-                        "rows": rows,
-                    })
-            
-            # Extract images for OCR and diagram processing
-            page_images = images_by_page.get(page_number, [])
-            diagrams = self._extract_diagrams(page_images, tables, file_id=file_id, page_number=page_number)
-            
-            pages.append({
-                "page_number": page_number,
-                "native_text": native_text.strip(),
-                "ocr_text": "",
-                "tables": tables,
-                "diagrams": diagrams,
-            })
 
-        native_pages = [native_pages_by_number.get(page_number, "") for page_number in range(1, len(pages) + 1)]
+        page_items = self._iter_docling_pages(doc)
+        for page_number, page_obj in page_items:
+            try:
+                if not hasattr(page_obj, "blocks"):
+                    raise AttributeError("Docling page object has no attribute 'blocks'")
+
+                # Extract text and tables from blocks
+                text_items = []
+                tables = []
+
+                for block_idx, block in enumerate(page_obj.blocks):
+                    block_type = type(block).__name__
+
+                    # Extract text from text blocks
+                    if block_type == "TextBlock":
+                        for line in block.text.split('\n'):
+                            if line.strip():
+                                text_items.append(line.strip())
+
+                    # Extract table structure
+                    elif block_type == "TableBlock":
+                        table_data = self._extract_docling_table(block)
+                        if table_data:
+                            tables.append(table_data)
+
+                native_text = " ".join(text_items)
+                native_pages_by_number[page_number] = native_text
+
+                # Extract images for OCR and diagram processing
+                page_images = images_by_page.get(page_number, [])
+                diagrams = self._extract_diagrams(page_images, tables, file_id=file_id, page_number=page_number)
+
+                pages.append({
+                    "page_number": page_number,
+                    "native_text": native_text.strip(),
+                    "ocr_text": "",
+                    "tables": tables,
+                    "diagrams": diagrams,
+                })
+                logger.debug(f"Page {page_number}: extracted {len(text_items)} text items, {len(tables)} tables")
+            except Exception as e:
+                logger.warning(f"Error processing page {page_number} with Docling: {e}")
+                # Append empty page structure for consistency
+                native_pages_by_number[page_number] = ""
+                pages.append({
+                    "page_number": page_number,
+                    "native_text": "",
+                    "ocr_text": "",
+                    "tables": [],
+                    "diagrams": [],
+                })
+
+        native_pages = [native_pages_by_number.get(page_number, "") for page_number, _ in page_items]
         rendered_pages = self._render_pages_for_ocr(filepath, native_pages)
         for page in pages:
             page_number = page["page_number"]
@@ -159,6 +172,26 @@ class PDFProcessor:
         
         logger.info("Successfully extracted %d pages using Docling", len(pages))
         return pages
+
+    def _iter_docling_pages(self, doc: Any) -> list[tuple[int, Any]]:
+        """Normalize Docling page containers into an ordered list of (page_number, page_object)."""
+        pages = getattr(doc, "pages", [])
+        if pages is None:
+            return []
+
+        if isinstance(pages, dict):
+            try:
+                return sorted(pages.items(), key=lambda item: int(item[0]))
+            except Exception:
+                return list(pages.items())
+
+        if hasattr(pages, "items") and callable(getattr(pages, "items")):
+            try:
+                return sorted(pages.items(), key=lambda item: int(item[0]))
+            except Exception:
+                return list(pages.items())
+
+        return list(enumerate(pages, start=1))
 
     def _extract_native_text_pages(self, filepath: str) -> list[str]:
         """Extract native text with pypdf, then fill weak pages with pdfplumber text."""
@@ -516,6 +549,45 @@ class PDFProcessor:
                         }
                     )
         return tables
+
+    def _extract_docling_table(self, table_block: Any) -> Optional[Dict[str, Any]]:
+        """Extract table structure from Docling TableBlock."""
+        try:
+            # Try to access table data
+            table_data = None
+            if hasattr(table_block, 'data'):
+                table_data = table_block.data
+            elif hasattr(table_block, 'table') and hasattr(table_block.table, 'data'):
+                table_data = table_block.table.data
+            
+            if not table_data:
+                return None
+            
+            # Convert to list of lists if needed
+            if not isinstance(table_data, list):
+                return None
+            
+            if len(table_data) == 0:
+                return None
+            
+            # First row becomes header, rest becomes rows
+            header = [str(cell).strip() for cell in table_data[0] if cell]
+            rows = [
+                [str(cell).strip() for cell in row if cell]
+                for row in table_data[1:]
+            ]
+            
+            if not header:
+                return None
+            
+            return {
+                "title": "Extracted Table",
+                "header": header,
+                "rows": rows,
+            }
+        except Exception as e:
+            logger.debug(f"Error extracting Docling table: {e}")
+            return None
 
     def _extract_diagrams(
         self,
