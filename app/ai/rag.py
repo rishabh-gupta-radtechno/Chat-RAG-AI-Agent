@@ -81,10 +81,8 @@ class RAGPipeline:
             else:
                 with open(filepath, "r", encoding="utf-8") as f:
                     raw = f.read()
-                page_segments = [(None, raw)]
-
+                text = self.text_processor.clean_text(raw)
                 logger.info(f"Extracted {len(text)} characters from {filename}")
-                text = self.text_processor.clean_text(text)
                 chunks = [
                     {
                         "text": chunk,
@@ -126,16 +124,6 @@ class RAGPipeline:
                         logger.warning(f"Skipping duplicate chunk id while embedding: {chunk_id}")
                         continue
                     seen_chunk_ids.add(chunk_id)
-
-                    metadata = {
-                        "file_id": str(file_id),
-                        "filename": filename,
-                        "chunk_index": i,
-                        "chunk_text": chunk,
-                        "chunk_size": len(chunk),
-                    }
-                    if page_number is not None:
-                        metadata["page_number"] = page_number
 
                     vectors.append({
                         "id": str(uuid.uuid5(file_id, chunk_id)),

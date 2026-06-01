@@ -102,61 +102,50 @@ class PDFProcessor:
         result = doc_converter.convert(filepath)
         doc = result.document
 
-        images_by_page = self._extract_page_images(filepath)
-        native_pages_by_number: dict[int, str] = {}
-        pages: list[Dict[str, Any]] = []
-        
-        for page_number, page in enumerate(doc.pages, start=1):
-            # Extract text content
-            text_items = []
-            for item in page.get_text_items():
-                text_items.append(item.text)
-            native_text = " ".join(text_items)
-            native_pages_by_number[page_number] = native_text
-            
-            # Extract tables
-            tables = []
-            for table in page.tables:
-                # Convert Docling table to our format
-                header = []
-                rows = []
-                
-                if table.data:
-                    # First row as header if it exists
-                    if len(table.data) > 0:
-                        header = [str(cell) for cell in table.data[0]]
-                        rows = [[str(cell) for cell in row] for row in table.data[1:]]
-                    
-                    tables.append({
-                        "title": f"Page {page_number} table {len(tables) + 1}",
-                        "header": header,
-                        "rows": rows,
-                    })
-            
-            # Extract images for OCR and diagram processing
-            page_images = images_by_page.get(page_number, [])
-            diagrams = self._extract_diagrams(page_images, tables, file_id=file_id, page_number=page_number)
-            
-            pages.append({
-                "page_number": page_number,
-                "native_text": native_text.strip(),
-                "ocr_text": "",
-                "tables": tables,
-                "diagrams": diagrams,
-            })
+        # doc.pages is Dict[PageNo, PageItem] in Docling v2 — must use .items()
+        page_count = len(doc.pages) if doc.pages else 0
+        if page_count == 0:
+            raise ValueError("Docling returned 0 pages")
 
-        native_pages = [native_pages_by_number.get(page_number, "") for page_number in range(1, len(pages) + 1)]
+        # Collect per-page text via provenance (iterate_items is the stable Docling v2 API)
+        pages_text: dict[int, list[str]] = {i: [] for i in range(1, page_count + 1)}
+        try:
+            for item, _ in doc.iterate_items():
+                prov_list = getattr(item, "prov", None) or []
+                page_no = prov_list[0].page_no if prov_list else None
+                if page_no is None or page_no not in pages_text:
+                    continue
+                item_text = getattr(item, "text", None)
+                if item_text and str(item_text).strip():
+                    pages_text[page_no].append(str(item_text).strip())
+        except Exception as exc:
+            logger.warning("Failed to iterate Docling items: %s", exc)
+
+        images_by_page = self._extract_page_images(filepath)
+        native_pages = [" ".join(pages_text.get(i, [])) for i in range(1, page_count + 1)]
         rendered_pages = self._render_pages_for_ocr(filepath, native_pages)
-        for page in pages:
-            page_number = page["page_number"]
+
+        pages: list[Dict[str, Any]] = []
+        for page_number in range(1, page_count + 1):
+            native_text = " ".join(pages_text.get(page_number, []))
             page_images = images_by_page.get(page_number, [])
-            ocr_inputs = []
+            ocr_inputs: list[Dict[str, Any]] = []
             rendered_page = rendered_pages.get(page_number)
             if rendered_page:
                 ocr_inputs.extend(rendered_page)
             ocr_inputs.extend(page_images)
-            page["ocr_text"] = self._extract_ocr_text(ocr_inputs).strip()
-        
+            ocr_text = self._extract_ocr_text(ocr_inputs)
+            tables = self._extract_tables(filepath, page_number)
+            diagrams = self._extract_diagrams(page_images, tables, file_id=file_id, page_number=page_number)
+
+            pages.append({
+                "page_number": page_number,
+                "native_text": native_text.strip(),
+                "ocr_text": ocr_text.strip(),
+                "tables": tables,
+                "diagrams": diagrams,
+            })
+
         logger.info("Successfully extracted %d pages using Docling", len(pages))
         return pages
 
