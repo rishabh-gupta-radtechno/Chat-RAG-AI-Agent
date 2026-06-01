@@ -1,7 +1,6 @@
 """
 Pydantic schemas for request/response validation.
 """
-
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -15,8 +14,12 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 class UserRegisterRequest(BaseModel):
     """User registration request schema."""
 
+    name: str = Field(..., min_length=1, max_length=255)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=100)
+    is_active: bool = Field(default=True)
+    department: Optional[str] = Field(None, max_length=255)
+    mobile: Optional[int] = None
 
 
 class UserLoginRequest(BaseModel):
@@ -24,6 +27,15 @@ class UserLoginRequest(BaseModel):
 
     email: EmailStr
     password: str
+
+class UserUpdateRequest(BaseModel):
+    """User update request schema for partial updates."""
+
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    email: Optional[EmailStr] = None
+    is_active: Optional[bool] = None
+    department: Optional[str] = Field(None, max_length=255)
+    mobile: Optional[int] = None
 
 
 class TokenResponse(BaseModel):
@@ -40,8 +52,11 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    name: Optional[str] = None
     email: str
     is_active: bool
+    department: Optional[str] = None
+    mobile: Optional[int] = None
     created_at: datetime
 
 
@@ -100,7 +115,7 @@ class SourceReference(BaseModel):
     file_id: UUID
     chunk_index: int
     relevance_score: float
-    page_number: int = 0
+    page_number: Optional[int] = None
     document_page_number: Optional[int] = None
     content_type: Optional[str] = None
     excerpt: Optional[str] = None
@@ -111,7 +126,7 @@ class DiagramReference(BaseModel):
 
     filename: str
     file_id: UUID
-    page_number: int
+    page_number: Optional[int] = None
     document_page_number: Optional[int] = None
     image_index: Optional[int] = None
     description: str
@@ -214,3 +229,46 @@ class DetailedHealthResponse(BaseModel):
     vector_db: Optional[str] = None
     llm: Optional[str] = None
     errors: list[str] = []
+
+
+# ============ Admin Schemas ============
+
+
+class AdminBase(BaseModel):
+    name: str
+    email: EmailStr
+    is_enabled: bool = True
+
+
+class AdminCreate(AdminBase):
+    password: str
+
+
+class AdminUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    password: Optional[str] = None
+    is_enabled: Optional[bool] = None
+
+class AdminLoginRequest(BaseModel):
+    """Admin login request schema."""
+    email: EmailStr
+    password: str
+
+class AdminLoginResponse(BaseModel):
+    """Admin login response schema."""
+    token: str
+    name: str
+    email: EmailStr
+
+class AdminResponse(AdminBase):
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AdminDeleteResponse(BaseModel):
+    id: UUID
+    message: str = "Admin deleted successfully"
