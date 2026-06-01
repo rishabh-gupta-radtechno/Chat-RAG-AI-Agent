@@ -1,10 +1,13 @@
 """
 File upload and management API routes.
 """
+from datetime import datetime
 
 from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user_id
@@ -71,13 +74,23 @@ async def upload_file(
 async def list_user_files(
     skip: int = 0,
     limit: int = 100,
+    filename: Optional[str] = Query(None, description="Filter by file name (case-insensitive)"),
+    start_date: Optional[datetime] = Query(None, description="Filter by upload date (start)"),
+    end_date: Optional[datetime] = Query(None, description="Filter by upload date (end)"),
     user_id = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_db),
 ):
-    """List files uploaded by current user."""
+    """List files uploaded by current user with optional filtering."""
     try:
         file_service = FileService(session)
-        files = await file_service.get_user_files(user_id, skip, limit)
+        files = await file_service.get_user_files(
+            user_id=user_id, 
+            skip=skip, 
+            limit=limit, 
+            filename=filename, 
+            start_date=start_date, 
+            end_date=end_date
+        )
         return files
     except Exception as e:
         logger.error(f"Error listing files: {e}")

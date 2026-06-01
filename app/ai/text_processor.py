@@ -108,19 +108,19 @@ class TextProcessor:
         return chunks
 
     @staticmethod
-    def extract_text_from_pdf(filepath: str) -> str:
-        """Extract text from PDF file."""
+    def extract_text_from_pdf(filepath: str) -> list[tuple[int, str]]:
+        """Extract text from PDF file, returning a list of (page_number, text) tuples."""
         try:
             import pypdf
 
-            text = ""
+            pages = []
             with open(filepath, "rb") as f:
                 pdf_reader = pypdf.PdfReader(f)
                 for page_num, page in enumerate(pdf_reader.pages):
                     page_text = page.extract_text()
-                    if page_text:
-                        text += f"\n[Page {page_num + 1}]\n{page_text}"
-            return text
+                    if page_text and page_text.strip():
+                        pages.append((page_num + 1, page_text))
+            return pages
         except ImportError:
             raise ImportError("pypdf is required for PDF processing")
         except Exception as e:

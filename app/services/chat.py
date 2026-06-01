@@ -1,6 +1,7 @@
 """
 Chat and RAG service with LLM integration.
 """
+from datetime import datetime
 
 import json
 import re
@@ -102,6 +103,7 @@ class ChatService:
                     document_page_number=doc.get("document_page_number"),
                     content_type=doc.get("content_type"),
                     excerpt=self._excerpt(doc.get("chunk_text", "")),
+                    page_number=doc.get("page_number"),
                 )
                 for doc in documents
             ]
@@ -499,3 +501,55 @@ Related diagrams:
                 return True
 
         return False
+    async def list_all_conversations(
+        self,
+        limit: int = 100,
+        user_name: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> list[dict]:
+        """List all conversation summaries across the system (all users)."""
+        rows = await self.chat_repo.list_all_conversations(limit, user_name=user_name, start_date=start_date, end_date=end_date)
+        return [
+            {
+                "user": {
+                    "id": row.ChatHistory.user_id,
+                    "name": row.name,
+                },
+                "conversation_id": row.ChatHistory.conversation_id,
+                "conversation_title": row.ChatHistory.question[:50] + "..." if len(row.ChatHistory.question) > 50 else row.ChatHistory.question,
+                "last_question": row.ChatHistory.question,
+                "last_answer": row.ChatHistory.answer,
+                "model": row.ChatHistory.model,
+                "startdate": row.start_date,
+                "last_activity": row.ChatHistory.created_at,
+            }
+            for row in rows
+        ]
+ 
+    async def get_conversation_history_by_id(
+        self,
+        conversation_id: uuid.UUID,
+        limit: int = 100,
+    ) -> list[ConversationTurnResponse]:
+        """Get ordered turns for a conversation."""
+        histories = await self.chat_repo.get_by_conversation_history(conversation_id, limit)
+        result = []
+        for history in histories:
+            try:
+                sources = json.loads(history.sources) if history.sources else []
+            except json.JSONDecodeError:
+                sources = []
+ 
+            result.append(
+                ConversationTurnResponse(
+                    id=history.id,
+                    conversation_id=history.conversation_id,
+                    question=history.question,
+                    answer=history.answer,
+                    sources=[SourceReference(**source) for source in sources],
+                    model=history.model,
+                    created_at=history.created_at,
+                )
+            )
+        return result
