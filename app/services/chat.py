@@ -77,9 +77,12 @@ class ChatService:
             # Retrieve relevant documents
             documents = await self.rag_pipeline.retrieve(retrieval_query, user_id=user_id)
             logger.info(f"Retrieved {len(documents)} documents")
+            diagram_user_id = None if any(
+                doc.get("retrieval_scope") == "global_fallback" for doc in documents
+            ) else str(user_id)
             diagrams = await self.rag_pipeline.vector_db.get_diagrams_for_sources(
                 documents,
-                user_id=str(user_id),
+                user_id=diagram_user_id,
             )
             logger.info(f"Retrieved {len(diagrams)} related diagrams")
 

@@ -164,23 +164,13 @@ class RAGPipeline:
                 query_embedding = await self.llm_client.embed(query)
             logger.info(f"Generated embedding for query: {query}")
 
-            # Semantic search
-            semantic_documents = await self.vector_db.search(
-                query_embedding=query_embedding,
-                top_k=top_k * 2,  # Get more for reranking
-                threshold=settings.similarity_threshold,
-                user_id=str(user_id) if user_id else None,
-            )
-
-            # BM25 search if enabled
-            bm25_documents = []
-            if settings.enable_bm25_search:
-                bm25_documents = await self._bm25_search(query, top_k * 2, user_id=user_id)
-
-            keyword_documents = await self.vector_db.keyword_search(
-                query,
-                top_k * 2,
-                user_id=str(user_id) if user_id else None,
+            semantic_documents, bm25_documents, keyword_documents, retrieval_user_id = (
+                await self._retrieve_candidates(
+                    query=query,
+                    query_embedding=query_embedding,
+                    limit=top_k * 2,
+                    user_id=user_id,
+                )
             )
 
             # Combine and deduplicate
@@ -208,7 +198,7 @@ class RAGPipeline:
 
             documents = await self._add_neighbor_context(
                 candidates[:top_k],
-                user_id=user_id,
+                user_id=retrieval_user_id,
                 max_documents=settings.rag_context_docs + max(top_k, 6),
             )
 
@@ -221,6 +211,65 @@ class RAGPipeline:
         except Exception as e:
             logger.error(f"Error retrieving documents: {e}")
             raise
+
+    async def _retrieve_candidates(
+        self,
+        query: str,
+        query_embedding: list[float],
+        limit: int,
+        user_id: Optional[uuid.UUID] = None,
+    ) -> tuple[list[dict], list[dict], list[dict], Optional[uuid.UUID]]:
+        """Retrieve scoped docs first, then fall back to shared/admin-ingested docs.
+
+        Server manuals are commonly uploaded by an admin account, while end users
+        chat from their own accounts. If the user-scoped Qdrant filter finds no
+        points, an unscoped fallback lets those centrally uploaded manuals answer.
+        """
+        semantic_documents = await self.vector_db.search(
+            query_embedding=query_embedding,
+            top_k=limit,
+            threshold=settings.similarity_threshold,
+            user_id=str(user_id) if user_id else None,
+        )
+
+        bm25_documents = []
+        if settings.enable_bm25_search:
+            bm25_documents = await self._bm25_search(query, limit, user_id=user_id)
+
+        keyword_documents = await self.vector_db.keyword_search(
+            query,
+            limit,
+            user_id=str(user_id) if user_id else None,
+        )
+
+        if not user_id or semantic_documents or bm25_documents or keyword_documents:
+            return semantic_documents, bm25_documents, keyword_documents, user_id
+
+        logger.info(
+            "No user-scoped documents found for user %s; retrying retrieval without user filter",
+            user_id,
+        )
+        semantic_documents = await self.vector_db.search(
+            query_embedding=query_embedding,
+            top_k=limit,
+            threshold=settings.similarity_threshold,
+            user_id=None,
+        )
+
+        bm25_documents = []
+        if settings.enable_bm25_search:
+            bm25_documents = await self._bm25_search(query, limit, user_id=None)
+
+        keyword_documents = await self.vector_db.keyword_search(
+            query,
+            limit,
+            user_id=None,
+        )
+
+        for document in semantic_documents + bm25_documents + keyword_documents:
+            document["retrieval_scope"] = "global_fallback"
+
+        return semantic_documents, bm25_documents, keyword_documents, None
 
     async def _bm25_search(
         self,
