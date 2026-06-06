@@ -19,6 +19,7 @@ class UserRegisterRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=100)
     is_active: bool = Field(default=True)
     department: Optional[str] = Field(None, max_length=255)
+    designation: Optional[str] = Field(None, max_length=255)
     mobile: Optional[int] = None
 
 
@@ -35,6 +36,7 @@ class UserUpdateRequest(BaseModel):
     email: Optional[EmailStr] = None
     is_active: Optional[bool] = None
     department: Optional[str] = Field(None, max_length=255)
+    designation: Optional[str] = Field(None, max_length=255)
     mobile: Optional[int] = None
 
 
@@ -56,6 +58,7 @@ class UserResponse(BaseModel):
     email: str
     is_active: bool
     department: Optional[str] = None
+    designation: Optional[str] = None
     mobile: Optional[int] = None
     created_at: datetime
 
@@ -85,6 +88,7 @@ class FileListResponse(BaseModel):
 
     id: UUID
     filename: str
+    filepath: str
     file_size: int
     file_type: str
     is_embedded: bool
@@ -112,6 +116,7 @@ class SourceReference(BaseModel):
     """Source reference for chat response."""
 
     filename: str
+    filepath: Optional[str] = None
     file_id: UUID
     chunk_index: int
     relevance_score: float
@@ -195,6 +200,7 @@ class ConversationTurnResponse(BaseModel):
     question: str
     answer: str
     sources: list[SourceReference]
+    diagrams: list[DiagramReference] = Field(default_factory=list)
     model: str
     created_at: datetime
 

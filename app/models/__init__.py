@@ -29,6 +29,7 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     department: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    designation: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     mobile: Mapped[Optional[int]] = mapped_column(BigInteger, unique=True, index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -82,6 +83,7 @@ class ChatHistory(Base):
     question: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
     sources: Mapped[str] = mapped_column(Text, nullable=True)  # JSON string of sources
+    diagrams: Mapped[str] = mapped_column(Text, nullable=True)  # JSON string of diagrams
     model: Mapped[str] = mapped_column(String(100), default="qwen2.5:3b")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

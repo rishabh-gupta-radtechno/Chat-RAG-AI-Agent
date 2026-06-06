@@ -81,6 +81,10 @@ async def create_all_tables():
                 """
             )
         )
+        # Add diagrams column to chat_histories if it doesn't exist
+        await conn.execute(
+            text("ALTER TABLE chat_histories ADD COLUMN IF NOT EXISTS diagrams TEXT")
+        )
         # Add new columns to users table if they don't exist
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(255)")
@@ -90,6 +94,9 @@ async def create_all_tables():
         )
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS department VARCHAR(255)")
+        )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS designation VARCHAR(255)")
         )
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile BIGINT")
