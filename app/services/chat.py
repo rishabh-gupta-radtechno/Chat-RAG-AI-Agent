@@ -648,12 +648,10 @@ Answer:
         for history in histories:
             try:
                 sources = json.loads(history.sources) if history.sources else []
-                print(f"Parsed sources for history {history.id}: {sources}")
             except json.JSONDecodeError:
                 sources = []
             try:
                 diagrams = json.loads(history.diagrams) if history.diagrams else []
-                print(f"Parsed diagrams for history {history.id}: {diagrams}")
             except json.JSONDecodeError:
                 diagrams = []
  
