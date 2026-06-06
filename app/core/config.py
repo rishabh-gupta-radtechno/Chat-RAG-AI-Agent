@@ -41,9 +41,9 @@ class Settings(BaseSettings):
     ollama_chat_model: str = "qwen2.5:3b"
     ollama_embedding_model: str = "nomic-embed-text"
     ollama_embeddings_path: str = "/api/embeddings"
-    ollama_timeout_seconds: int = 600
+    ollama_timeout_seconds: int = 120
     ollama_num_ctx: int = 4096
-    ollama_num_predict: int = 160
+    ollama_num_predict: int = 512
 
     # File Upload
     upload_dir: str = "static/uploads"
@@ -54,12 +54,29 @@ class Settings(BaseSettings):
     embedding_dimension: int = 768
     chunk_size: int = 1024
     chunk_overlap: int = 128
+    pdf_chunk_size: int = 450
+    pdf_chunk_overlap: int = 80
+
+    # PDF Processing
+    use_docling: bool = True  # Use Docling for advanced PDF processing
+    ocr_engine: str = "paddleocr"
+    enable_diagram_captioning: bool = False
+    ocr_confidence_threshold: float = 0.6
+    ocr_full_page: bool = True
+    ocr_full_page_min_text_chars: int = 80
+    ocr_full_page_dpi: int = 300
+    enable_bm25_search: bool = False
+    enable_reranking: bool = False
+    rerank_top_k: int = 10
+    embedding_model_local: str = "sentence-transformers/all-MiniLM-L6-v2"
+    use_local_embeddings: bool = False
 
     # RAG
     vector_search_top_k: int = 5
     similarity_threshold: float = 0.5
-    rag_context_docs: int = 3
-    rag_context_max_chars: int = 4000
+    retrieval_neighbor_pages: int = 1
+    rag_context_docs: int = 6
+    rag_context_max_chars: int = 8000
 
     # Logging
     log_level: str = "INFO"

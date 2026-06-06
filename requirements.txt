@@ -23,3 +23,19 @@ pytest-asyncio
 black
 flake8
 mypy
+
+# Multimodal PDF processing
+PyMuPDF
+opencv-python-headless
+pytesseract
+paddlepaddle
+paddleocr
+camelot-py
+pdfplumber
+docling
+
+# Improved embeddings and retrieval
+sentence-transformers
+rank-bm25
+transformers
+torch
