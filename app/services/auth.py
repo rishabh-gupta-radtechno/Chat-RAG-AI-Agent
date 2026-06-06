@@ -25,7 +25,7 @@ class AuthService:
         self.session = session
         self.user_repo = UserRepository(session)
 
-    async def register(self, email: str, password: str, name: str, department: Optional[str] = None, mobile: Optional[int] = None, is_active: bool = True) -> UserResponse:
+    async def register(self, email: str, password: str, name: str, department: Optional[str] = None, designation: Optional[str] = None, mobile: Optional[int] = None, is_active: bool = True) -> UserResponse:
         """Register a new user."""
         # Check if user already exists
         existing_user = await self.user_repo.get_by_email(email)
@@ -47,6 +47,7 @@ class AuthService:
             password_hash=password_hash,
             is_active=is_active,
             department=department,
+            designation=designation,
             mobile=mobile,
             is_deleted=False,
         )
@@ -108,6 +109,7 @@ class AuthService:
         name: Optional[str] = None,
         email: Optional[str] = None,
         department: Optional[str] = None,
+        designation: Optional[str] = None,
         mobile: Optional[int] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
@@ -119,6 +121,7 @@ class AuthService:
             name=name, 
             email=email, 
             department=department,
+            designation=designation,
             mobile=mobile,
             start_date=start_date, 
             end_date=end_date
