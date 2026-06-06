@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     enable_bm25_search: bool = False
     enable_reranking: bool = True
     rerank_top_k: int = 10
-    embedding_model_local: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_model_local: str = "BAAI/bge-m3"
     use_local_embeddings: bool = False
 
     # RAG
