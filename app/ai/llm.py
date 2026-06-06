@@ -37,6 +37,7 @@ class OllamaClient:
         system: Optional[str] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        num_predict: Optional[int] = None,
     ) -> str:
         """Generate text using Ollama."""
         try:
@@ -60,7 +61,7 @@ class OllamaClient:
                         "temperature": temperature,
                         "top_p": top_p,
                         "num_ctx": settings.ollama_num_ctx,
-                        "num_predict": settings.ollama_num_predict,
+                        "num_predict": num_predict or settings.ollama_num_predict,
                     },
                     "keep_alive": "10m",
                     "stream": False,

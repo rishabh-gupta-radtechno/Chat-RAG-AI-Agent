@@ -55,7 +55,7 @@ class RAGPipeline:
         """Initialize cross-encoder reranker."""
         try:
             from sentence_transformers import CrossEncoder
-            self._reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+            self._reranker = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
             logger.info("Reranking enabled")
         except ImportError:
             logger.warning("sentence-transformers not installed, reranking disabled")
@@ -149,20 +149,27 @@ class RAGPipeline:
         query: str,
         top_k: Optional[int] = None,
         user_id: Optional[uuid.UUID] = None,
+        embed_query: Optional[str] = None,
     ) -> list[dict]:
-        """Retrieve relevant documents for a query with hybrid search and reranking."""
+        """Retrieve relevant documents for a query with hybrid search and reranking.
+
+        embed_query: if provided, use this text for the vector embedding instead of
+        the full query string. Pass the English translation for Hindi questions so the
+        embedding is not diluted by Devanagari tokens.
+        """
         try:
             if not self._initialized:
                 await self.initialize()
 
             top_k = top_k or settings.vector_search_top_k
 
-            # Generate query embedding
+            # Use embed_query for vector embedding (English-only for Hindi input)
+            embed_text = embed_query or query
             if settings.use_local_embeddings:
-                query_embedding = self._embed_locally(query)
+                query_embedding = self._embed_locally(embed_text)
             else:
-                query_embedding = await self.llm_client.embed(query)
-            logger.info(f"Generated embedding for query: {query}")
+                query_embedding = await self.llm_client.embed(embed_text)
+            logger.info(f"Generated embedding for query: {embed_text}")
 
             semantic_documents, bm25_documents, keyword_documents, retrieval_user_id = (
                 await self._retrieve_candidates(

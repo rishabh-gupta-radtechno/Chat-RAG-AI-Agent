@@ -72,10 +72,11 @@ class ChatService:
                 limit=6,
             )
 
-            retrieval_query = await self._build_retrieval_query(message, history)
+            retrieval_query, embed_query = await self._build_retrieval_query(message, history)
+            translated_query = embed_query if self._contains_devanagari(message) else ""
 
             # Retrieve relevant documents
-            documents = await self.rag_pipeline.retrieve(retrieval_query, user_id=user_id)
+            documents = await self.rag_pipeline.retrieve(retrieval_query, user_id=user_id, embed_query=embed_query)
             logger.info(f"Retrieved {len(documents)} documents")
             diagram_user_id = None if any(
                 doc.get("retrieval_scope") == "global_fallback" for doc in documents
@@ -92,6 +93,7 @@ class ChatService:
                 documents=documents,
                 diagrams=diagrams,
                 history=history,
+                translated_query=translated_query,
             )
             logger.info("Agent generated response")
 
@@ -125,8 +127,7 @@ class ChatService:
                 for diagram in diagrams
             ]
 
-            unsupported_answer = "The uploaded documents do not provide enough information to answer this question."
-            if response.get("answer", "").strip() == unsupported_answer:
+            if response.get("answer", "").strip() == self._not_found_answer(message):
                 sources = []
                 diagram_references = []
 
@@ -154,14 +155,21 @@ class ChatService:
             logger.error(f"Error processing question: {e}")
             raise
 
-    async def _build_retrieval_query(self, message: str, history: list) -> str:
-        """Expand retrieval query with recent user turns for follow-up questions."""
+    async def _build_retrieval_query(self, message: str, history: list) -> tuple[str, str]:
+        """Expand retrieval query with recent user turns for follow-up questions.
+
+        Returns (full_query, embed_query) where embed_query is English-only for Hindi
+        input so the vector search embedding is not diluted by Devanagari tokens.
+        """
         prior_questions = [turn.question.strip() for turn in history[-2:] if getattr(turn, "question", "").strip()]
         query_parts = prior_questions + [message]
         translated_query = await self._translate_query_for_retrieval(message)
         if translated_query and translated_query != message:
             query_parts.append(f"English retrieval query: {translated_query}")
-        return "\n".join(query_parts)
+            embed_query = translated_query
+        else:
+            embed_query = message
+        return "\n".join(query_parts), embed_query
 
     async def _translate_query_for_retrieval(self, message: str) -> str:
         """Translate Hindi/Devanagari questions to English for retrieval.
@@ -174,15 +182,15 @@ class ChatService:
             return message
 
         try:
-            prompt = f"""Translate this user question to English for document retrieval.
-Preserve railway, air brake, valve, reservoir, pressure, part names, abbreviations, and numeric values.
+            prompt = f"""Translate this question to English for document retrieval.
+Preserve technical terms, part names, abbreviations, model numbers, and numeric values exactly.
 Return only one concise English query. Do not answer the question.
 
 Question:
 {message}"""
             translated = await self.llm_client.generate(
                 prompt,
-                system="You translate Hindi technical search queries into English. Return only the translated query.",
+                system="You translate search queries into English. Return only the translated query.",
                 temperature=0.0,
                 top_p=0.8,
             )
@@ -201,8 +209,18 @@ Question:
         documents: list[dict],
         diagrams: list[dict],
         history: list,
+        translated_query: str = "",
     ) -> dict:
-        """Generate an answer with retrieved docs and recent conversation context."""
+        """Generate an answer with retrieved docs and recent conversation context.
+
+        translated_query: English translation of a Hindi message, used for term-based
+        matching against English document chunks when the original message has no
+        extractable ASCII terms.
+        """
+        # For Hindi questions, use the English translation for term-based extraction
+        # since all indexed document text is English.
+        terms_source = translated_query if (translated_query and not self._important_terms(message)) else message
+
         extraction_documents = documents + [
             {
                 **diagram,
@@ -211,7 +229,7 @@ Question:
             }
             for diagram in diagrams
         ]
-        extracted_answer = self.agent._extract_procedure_answer(message, extraction_documents)
+        extracted_answer = self.agent._extract_procedure_answer(terms_source, extraction_documents)
         if extracted_answer:
             source_pages = self._source_page_summary(documents)
             diagram_pages = self._diagram_page_summary(diagrams)
@@ -225,7 +243,7 @@ Question:
                 "thinking": f"Used {min(len(documents), settings.rag_context_docs)} of {len(documents)} retrieved document chunks and {len(diagrams)} related diagrams.",
             }
 
-        direct_answer = self._extract_direct_answer(message, documents, diagrams)
+        direct_answer = self._extract_direct_answer(terms_source, documents, diagrams)
         if direct_answer:
             direct_answer = await self._localize_answer(message, direct_answer)
             return {
@@ -233,17 +251,14 @@ Question:
                 "thinking": f"Used direct matching text from {len(documents)} retrieved document chunks and {len(diagrams)} related diagrams.",
             }
 
-        if not self._has_sufficient_evidence(message, documents):
-            answer = "The uploaded documents do not provide enough information to answer this question."
-            answer = await self._localize_answer(message, answer)
+        if not self._has_sufficient_evidence(terms_source, documents):
             return {
-                "answer": answer,
+                "answer": self._not_found_answer(message),
                 "thinking": f"Found {len(documents)} retrieved chunks, but none provided enough direct evidence.",
             }
 
         context = self.agent._format_context(documents)
         diagram_context = self._format_diagram_context(diagrams)
-        answer_language = "Hindi using Devanagari script" if self._contains_devanagari(message) else "the same language as the user"
         history_lines = []
         for turn in history:
             history_lines.append(f"User: {turn.question}")
@@ -251,13 +266,12 @@ Question:
         history_text = "\n".join(history_lines) if history_lines else "No previous conversation."
 
         prompt = f"""Answer the user's latest message using the retrieved context and recent conversation.
-Required answer language: {answer_language}.
+Respond in the same language the user used. If the user wrote in Hindi, answer in Hindi (Devanagari script) and keep any English technical terms, abbreviations, measurements, and numbers from the source exactly as written.
 Use the conversation history for follow-up references such as 'it', 'that', or 'the above part'.
 Answer with page numbers for important facts, using short citations like "(page 3)".
-If the required answer language is Hindi, do not answer in English except for technical names, abbreviations, units, file names, and page references.
 Prefer exact wording from the context for definitions, names, numbers, limits, and procedures.
 If related diagrams are available, include a short "Diagrams" line with their page numbers.
-If the retrieved context does not support the answer, say the uploaded documents do not provide enough information.
+If the retrieved context does not support the answer, say the documents do not provide enough information.
 Do not use outside knowledge.
 Keep the answer direct and concise.
 
@@ -275,21 +289,23 @@ Related diagrams:
 
         answer = await self.llm_client.generate(
             prompt,
-            system=f"You are a careful RAG assistant. Use recent chat history only as conversational context, and use the retrieved documents as the factual source of truth. Always follow the required answer language.",
+            system="You are a careful RAG assistant. Always respond in the same language as the user's question. Use the retrieved documents as the factual source of truth. Do not invent facts.",
             temperature=0.2,
             top_p=0.9,
         )
 
-        # Validation: Check if answer is grounded in retrieved chunks
         is_grounded = self._validate_answer_grounding(answer, documents)
-        has_citation = "do not provide enough information" in answer.lower() or bool(
-            re.search(r"\bpage\s+\d+\b|\(page\s+\d+\)", answer, re.IGNORECASE)
+        has_citation = (
+            "do not provide enough information" in answer.lower()
+            or bool(re.search(r"\bpage\s+\d+\b|\(page\s+\d+\)", answer, re.IGNORECASE))
+            or not self._important_terms(answer)
         )
         if not is_grounded or not has_citation:
             logger.warning("Answer not grounded in retrieved documents")
-            answer = "The uploaded documents do not provide enough information to answer this question."
-
-        answer = await self._localize_answer(message, answer)
+            answer = self._not_found_answer(message)
+        elif self._contains_devanagari(message) and not self._contains_devanagari(answer):
+            # Model ignored the language instruction — translate as fallback
+            answer = await self._localize_answer(message, answer)
 
         return {
             "answer": answer,
@@ -306,17 +322,21 @@ Related diagrams:
         logger.info("Localizing answer to Hindi because the user message is Devanagari")
         try:
             prompt = f"""Translate this answer to Hindi using Devanagari script.
-Preserve technical names, abbreviations, file names, page references, numbers, and units exactly.
-Do not add new facts. Do not remove citations or source lines.
-Return only the translated Hindi answer. The output must contain Devanagari characters.
+
+Rules:
+- Any word that appears in English in the source must stay in English exactly as written — do NOT transliterate English words into Devanagari.
+- This applies to: technical terms, proper nouns, abbreviations, acronyms, measurements, units, numbers, file names, and page references.
+- Do not add new facts. Do not remove citations or source lines.
+- Return only the translated Hindi answer. The output must contain Devanagari characters.
 
 Answer:
 {answer}"""
             translated = await self.llm_client.generate(
                 prompt,
-                system="You translate grounded RAG answers into Hindi. Preserve citations, units, and technical identifiers exactly.",
+                system="You translate technical answers into Hindi Devanagari. English technical terms, abbreviations, and proper nouns must stay in English exactly as written — never transliterate them into Devanagari script.",
                 temperature=0.0,
                 top_p=0.8,
+                num_predict=1024,
             )
             translated = (translated or "").strip()
             if translated and self._contains_devanagari(translated):
@@ -324,16 +344,18 @@ Answer:
 
             logger.warning("Hindi localization returned non-Devanagari output; retrying")
             retry_prompt = f"""हिंदी में देवनागरी लिपि का उपयोग करके नीचे दिए गए उत्तर का अनुवाद करें।
-तकनीकी नाम, abbreviations, file names, page references, numbers, और units exactly वैसे ही रखें।
+महत्वपूर्ण: जो शब्द source में English में हैं, उन्हें English में ही रखें — उन्हें देवनागरी में मत लिखें।
+इसमें शामिल हैं: technical terms, abbreviations, acronyms, measurements, units, numbers, file names, page references।
 केवल हिंदी अनुवाद लौटाएं।
 
 Answer:
 {answer}"""
             translated = await self.llm_client.generate(
                 retry_prompt,
-                system="Translate the answer into Hindi Devanagari. Do not answer in English.",
+                system="Translate the answer into Hindi Devanagari. English technical terms and abbreviations must remain in English exactly. Do not transliterate any English word.",
                 temperature=0.0,
                 top_p=0.8,
+                num_predict=1024,
             )
             translated = (translated or "").strip()
             if translated and self._contains_devanagari(translated):
@@ -343,6 +365,13 @@ Answer:
 
         logger.warning("Returning original answer because Hindi localization failed")
         return answer
+
+    @staticmethod
+    def _not_found_answer(message: str) -> str:
+        """Return a sensible not-found message in the user's language."""
+        if ChatService._contains_devanagari(message):
+            return "माफ़ करें, अपलोड किए गए दस्तावेज़ों में आपके इस सवाल का जवाब नहीं मिला। कृपया संबंधित दस्तावेज़ अपलोड करें या अलग शब्दों में पूछें।"
+        return "The uploaded documents do not provide enough information to answer this question."
 
     @staticmethod
     def _excerpt(text: str, max_chars: int = 240) -> str:
@@ -567,16 +596,20 @@ Answer:
         if "do not provide enough information" in answer_lower:
             return True
 
-        # Keep this permissive: local models often paraphrase manual text, and
-        # over-strict validation turns good retrieved context into a refusal.
+        # Extract English words from the answer for overlap check.
+        # For Hindi answers the model may output very few English words —
+        # if none are found, fall back to checking the documents have any
+        # content at all (non-empty retrieval is a weak but safe signal).
         key_phrases = [
             word
             for word in re.findall(r"[a-z0-9]+", answer_lower)
             if len(word) > 4
         ]
-        matches = sum(1 for phrase in key_phrases if phrase in combined_text)
+        if not key_phrases:
+            return bool(combined_text.strip())
 
-        return matches / len(key_phrases) >= 0.2 if key_phrases else True
+        matches = sum(1 for phrase in key_phrases if phrase in combined_text)
+        return matches / len(key_phrases) >= 0.2
 
     def _has_sufficient_evidence(self, message: str, documents: list[dict]) -> bool:
         if not documents:
