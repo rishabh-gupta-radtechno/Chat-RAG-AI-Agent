@@ -162,14 +162,21 @@ async def sync_embeddings(
         if not file_obj or file_obj.uploaded_by != user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
+        # Save metadata needed for processing and free the session
+        filepath = file_obj.filepath
+        filename = file_obj.filename
+
         # Process embeddings
         rag_pipeline = RAGPipeline()
         await rag_pipeline.initialize()
         await rag_pipeline.vector_db.delete_by_file_id(str(file_uuid))
+        
+        # Perform the heavy lifting outside the active transaction if possible, 
+        # but since we are in a route, we must ensure we don't time out.
         chunks_created = await rag_pipeline.process_document(
-            filepath=file_obj.filepath,
+            filepath=filepath,
             file_id=file_uuid,
-            filename=file_obj.filename,
+            filename=filename,
             user_id=user_id,
         )
 

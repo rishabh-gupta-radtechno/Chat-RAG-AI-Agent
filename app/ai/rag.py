@@ -55,7 +55,7 @@ class RAGPipeline:
         """Initialize cross-encoder reranker."""
         try:
             from sentence_transformers import CrossEncoder
-            self._reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+            self._reranker = CrossEncoder('BAAI/bge-reranker-base')
             logger.info("Reranking enabled")
         except ImportError:
             logger.warning("sentence-transformers not installed, reranking disabled")
@@ -99,6 +99,7 @@ class RAGPipeline:
 
             # Generate embeddings and upsert
             vectors = []
+            total_upserted = 0
             seen_chunk_ids: set[str] = set()
             for i, chunk in enumerate(chunks):
                 try:
@@ -130,15 +131,22 @@ class RAGPipeline:
                         "embedding": embedding,
                         "metadata": metadata,
                     })
+                    
+                    # Batch upsert every 20 vectors to save memory
+                    if len(vectors) >= 20:
+                        await self.vector_db.upsert_vectors(vectors)
+                        total_upserted += len(vectors)
+                        vectors = []
                 except Exception as e:
                     logger.warning(f"Error embedding chunk {i}: {e}")
                     continue
 
             if vectors:
                 await self.vector_db.upsert_vectors(vectors)
-                logger.info(f"Upserted {len(vectors)} vectors")
+                total_upserted += len(vectors)
 
-            return len(vectors)
+            logger.info(f"Total upserted {total_upserted} vectors")
+            return total_upserted
 
         except Exception as e:
             logger.error(f"Error processing document: {e}")
@@ -192,7 +200,11 @@ class RAGPipeline:
 
             # Rerank if enabled
             if settings.enable_reranking and self._reranker:
-                candidates = self._rerank_documents(query, candidates, settings.rerank_top_k)
+                # Get slightly more candidates for reranking
+                candidates = self._rerank_documents(query, candidates, top_k=settings.rerank_top_k + 5)
+                # Aggressively filter out noise below 0.4 to save context space/memory
+                candidates = [doc for doc in candidates if doc.get("relevance_score", 0) > 0.4]
+                candidates = candidates[:top_k]
             else:
                 candidates.sort(key=self._combined_retrieval_score, reverse=True)
 

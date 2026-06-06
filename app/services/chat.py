@@ -28,6 +28,7 @@ from app.schemas import (
 logger = get_logger(__name__)
 settings = get_settings()
 
+UNSUPPORTED_ANSWER = "The uploaded documents do not provide enough information to answer this question."
 
 class ChatService:
     """Chat service with RAG and agent integration."""
@@ -125,8 +126,7 @@ class ChatService:
                 for diagram in diagrams
             ]
 
-            unsupported_answer = "The uploaded documents do not provide enough information to answer this question."
-            if response.get("answer", "").strip() == unsupported_answer:
+            if response.get("answer", "").strip() == UNSUPPORTED_ANSWER:
                 sources = []
                 diagram_references = []
 
@@ -234,8 +234,7 @@ Question:
             }
 
         if not self._has_sufficient_evidence(message, documents):
-            answer = "The uploaded documents do not provide enough information to answer this question."
-            answer = await self._localize_answer(message, answer)
+            answer = await self._localize_answer(message, UNSUPPORTED_ANSWER)
             return {
                 "answer": answer,
                 "thinking": f"Found {len(documents)} retrieved chunks, but none provided enough direct evidence.",
@@ -252,14 +251,13 @@ Question:
 
         prompt = f"""Answer the user's latest message using the retrieved context and recent conversation.
 Required answer language: {answer_language}.
-Use the conversation history for follow-up references such as 'it', 'that', or 'the above part'.
-Answer with page numbers for important facts, using short citations like "(page 3)".
-If the required answer language is Hindi, do not answer in English except for technical names, abbreviations, units, file names, and page references.
-Prefer exact wording from the context for definitions, names, numbers, limits, and procedures.
-If related diagrams are available, include a short "Diagrams" line with their page numbers.
-If the retrieved context does not support the answer, say the uploaded documents do not provide enough information.
-Do not use outside knowledge.
-Keep the answer direct and concise.
+
+### Guidelines:
+1. Translation Bridge: If the user asked in Hindi, prioritize technical accuracy. Keep technical terms, part names (valves, reservoirs), and units in English even within Hindi text.
+2. Grounding: Answer ONLY using the retrieved context. Use "(page X)" for citations.
+3. Context Usage: Use history for references like "it" or "the part mentioned before".
+4. Formatting: Use numbered steps for procedures. Mention relevant diagrams if provided.
+5. Safety: If the context is insufficient, state: "{UNSUPPORTED_ANSWER}"
 
 Recent conversation:
 {history_text}
@@ -287,7 +285,7 @@ Related diagrams:
         )
         if not is_grounded or not has_citation:
             logger.warning("Answer not grounded in retrieved documents")
-            answer = "The uploaded documents do not provide enough information to answer this question."
+            answer = UNSUPPORTED_ANSWER
 
         answer = await self._localize_answer(message, answer)
 

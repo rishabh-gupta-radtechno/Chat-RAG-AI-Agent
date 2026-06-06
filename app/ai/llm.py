@@ -96,7 +96,7 @@ class OllamaClient:
             path = f"/{path}"
 
         url = f"{self.base_url.rstrip('/')}{path}"
-        payload = {"model": self.embedding_model}
+        payload = {"model": self.embedding_model, "keep_alive": 0}
 
         if path == "/api/embed":
             payload["input"] = text

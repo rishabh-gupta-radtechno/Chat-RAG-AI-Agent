@@ -39,10 +39,10 @@ class Settings(BaseSettings):
     # Ollama
     ollama_base_url: str = "http://localhost:11434"
     ollama_chat_model: str = "qwen2.5:3b"
-    ollama_embedding_model: str = "nomic-embed-text"
+    ollama_embedding_model: str = "bge-m3"
     ollama_embeddings_path: str = "/api/embeddings"
-    ollama_timeout_seconds: int = 120
-    ollama_num_ctx: int = 4096
+    ollama_timeout_seconds: int = 300
+    ollama_num_ctx: int = 3072
     ollama_num_predict: int = 512
 
     # File Upload
@@ -50,8 +50,8 @@ class Settings(BaseSettings):
     max_upload_size: int = 104857600  # 100MB
 
     # Embedding
-    embedding_model: str = "nomic-embed-text"
-    embedding_dimension: int = 768
+    embedding_model: str = "bge-m3"
+    embedding_dimension: int = 1024
     chunk_size: int = 1024
     chunk_overlap: int = 128
     pdf_chunk_size: int = 450
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     ocr_full_page_min_text_chars: int = 80
     ocr_full_page_dpi: int = 300
     enable_bm25_search: bool = False
-    enable_reranking: bool = False
+    enable_reranking: bool = True
     rerank_top_k: int = 10
     embedding_model_local: str = "sentence-transformers/all-MiniLM-L6-v2"
     use_local_embeddings: bool = False
@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     similarity_threshold: float = 0.5
     retrieval_neighbor_pages: int = 1
     rag_context_docs: int = 6
-    rag_context_max_chars: int = 8000
+    rag_context_max_chars: int = 5000
 
     # Logging
     log_level: str = "INFO"

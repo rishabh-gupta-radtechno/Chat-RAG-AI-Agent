@@ -12,7 +12,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -30,7 +30,7 @@ services:
     environment:
       QDRANT_API_KEY: qdrant-api-key
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      test: [ "CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -48,7 +48,7 @@ services:
     environment:
       OLLAMA_HOST: 0.0.0.0:11434
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: [ "CMD", "ollama", "list" ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -70,7 +70,7 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_CHAT_MODEL=qwen2.5:3b
       - OLLAMA_EMBEDDINGS_PATH=/api/embeddings
-      - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+      - OLLAMA_EMBEDDING_MODEL=bge-m3
       - OLLAMA_TIMEOUT_SECONDS=600
       - OLLAMA_NUM_CTX=4096
       - OLLAMA_NUM_PREDICT=512
@@ -86,7 +86,7 @@ services:
       ollama:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health/', timeout=5.0).raise_for_status()"]
+      test: [ "CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health/', timeout=5.0).raise_for_status()" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -102,7 +102,7 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 5
