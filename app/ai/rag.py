@@ -111,6 +111,7 @@ class RAGPipeline:
                     if user_id:
                         metadata["user_id"] = str(user_id)
                     metadata["filename"] = filename
+                    metadata["filepath"] = filepath
                     metadata["chunk_index"] = i
                     metadata["chunk_size"] = len(chunk["text"])
                     metadata["chunk_text"] = chunk["text"]

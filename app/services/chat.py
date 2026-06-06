@@ -101,6 +101,7 @@ class ChatService:
             sources = [
                 SourceReference(
                     filename=doc.get("filename", "Unknown"),
+                    filepath=doc.get("filepath"),
                     file_id=uuid.UUID(doc.get("file_id", "00000000-0000-0000-0000-000000000000")),
                     chunk_index=doc.get("chunk_index", 0),
                     relevance_score=doc.get("relevance_score", 0.0),
@@ -138,6 +139,7 @@ class ChatService:
                 question=message,
                 answer=response.get("answer", ""),
                 sources=[s.model_dump(mode="json") for s in sources],
+                diagrams=[d.model_dump(mode="json") for d in diagram_references],
                 model=settings.ollama_chat_model,
             )
             await self.chat_repo.commit()
@@ -526,6 +528,10 @@ Answer:
                 sources = json.loads(h.sources) if h.sources else []
             except json.JSONDecodeError:
                 sources = []
+            try:
+                diagrams = json.loads(h.diagrams) if h.diagrams else []
+            except json.JSONDecodeError:
+                diagrams = []
 
             result.append({
                 "id": h.id,
@@ -533,6 +539,7 @@ Answer:
                 "question": h.question,
                 "answer": h.answer,
                 "sources": [SourceReference(**source) for source in sources],
+                "diagrams": [DiagramReference(**diagram) for diagram in diagrams],
                 "created_at": h.created_at,
             })
         return result
@@ -551,6 +558,10 @@ Answer:
                 sources = json.loads(history.sources) if history.sources else []
             except json.JSONDecodeError:
                 sources = []
+            try:
+                diagrams = json.loads(history.diagrams) if history.diagrams else []
+            except json.JSONDecodeError:
+                diagrams = []
 
             result.append(
                 ConversationTurnResponse(
@@ -559,6 +570,7 @@ Answer:
                     question=history.question,
                     answer=history.answer,
                     sources=[SourceReference(**source) for source in sources],
+                    diagrams=[DiagramReference(**diagram) for diagram in diagrams],
                     model=history.model,
                     created_at=history.created_at,
                 )
@@ -671,6 +683,10 @@ Answer:
                 sources = json.loads(history.sources) if history.sources else []
             except json.JSONDecodeError:
                 sources = []
+            try:
+                diagrams = json.loads(history.diagrams) if history.diagrams else []
+            except json.JSONDecodeError:
+                diagrams = []
  
             result.append(
                 ConversationTurnResponse(
@@ -679,6 +695,7 @@ Answer:
                     question=history.question,
                     answer=history.answer,
                     sources=[SourceReference(**source) for source in sources],
+                    diagrams=[DiagramReference(**diagram) for diagram in diagrams],
                     model=history.model,
                     created_at=history.created_at,
                 )

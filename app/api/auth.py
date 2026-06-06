@@ -32,6 +32,7 @@ async def register(
             password=request.password,
             name=request.name,
             department=request.department,
+            designation=request.designation,
             mobile=request.mobile,
             is_active=request.is_active
         )
@@ -79,6 +80,7 @@ async def get_all_users(
     name: Optional[str] = Query(None, description="Filter by user name"),
     email: Optional[EmailStr] = Query(None, description="Filter by user email"),
     department: Optional[str] = Query(None, description="Filter by department"),
+    designation: Optional[str] = Query(None, description="Filter by designation"),
     mobile: Optional[int] = Query(None, description="Filter by mobile number"),
     start_date: Optional[datetime] = Query(None, description="Filter by creation date (start)"),
     end_date: Optional[datetime] = Query(None, description="Filter by creation date (end)"),
@@ -87,7 +89,7 @@ async def get_all_users(
 ):
     """Get all registered users."""
     auth_service = AuthService(session)
-    return await auth_service.get_all_users(skip=skip, limit=limit, name=name, email=email, department=department, mobile=mobile, start_date=start_date, end_date=end_date)
+    return await auth_service.get_all_users(skip=skip, limit=limit, name=name, email=email, department=department, designation=designation, mobile=mobile, start_date=start_date, end_date=end_date)
 
 
 @router.put("/updateUser/{user_id}", response_model=UserResponse)

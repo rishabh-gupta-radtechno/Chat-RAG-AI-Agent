@@ -38,7 +38,7 @@ class UserRepository(BaseRepository[User]):
         result = await self.session.execute(stmt)
         return result.scalars().first()
 
-    async def get_all(self, skip: int = 0, limit: int = 100, name: Optional[str] = None, email: Optional[str] = None, department: Optional[str] = None, mobile: Optional[int] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[User]:
+    async def get_all(self, skip: int = 0, limit: int = 100, name: Optional[str] = None, email: Optional[str] = None, department: Optional[str] = None, designation: Optional[str] = None, mobile: Optional[int] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[User]:
         """Get all users with optional filtering by name, email, and date, excluding deleted ones."""
         query = select(User).where(User.is_deleted == False)
 
@@ -48,6 +48,8 @@ class UserRepository(BaseRepository[User]):
             query = query.where(User.email.ilike(f"%{email}%"))
         if department:
             query = query.where(User.department.ilike(f"%{department}%"))
+        if designation:
+            query = query.where(User.designation.ilike(f"%{designation}%"))
         if mobile:
             query = query.where(User.mobile == mobile)
         if start_date:

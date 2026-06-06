@@ -119,16 +119,19 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
         question: str,
         answer: str,
         sources: list[dict],
+        diagrams: Optional[list[dict]] = None,
         model: Optional[str] = None,
     ) -> ChatHistory:
-        """Create chat history with sources."""
+        """Create chat history with sources and diagrams."""
         sources_json = json.dumps(sources, default=str)
+        diagrams_json = json.dumps(diagrams, default=str) if diagrams else None
         return await self.create(
             user_id=user_id,
             conversation_id=conversation_id,
             question=question,
             answer=answer,
             sources=sources_json,
+            diagrams=diagrams_json,
             model=model or "",
         )
 
