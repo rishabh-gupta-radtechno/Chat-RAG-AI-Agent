@@ -79,7 +79,10 @@ class OllamaClient:
                 self.model,
                 time.perf_counter() - started_at,
             )
-            return result.get("message", {}).get("content", "")
+            content = result.get("message", {}).get("content", "")
+            # Strip thinking blocks emitted by reasoning models (e.g. qwen3)
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            return content
 
         except httpx.ReadTimeout as e:
             raise TimeoutError(
