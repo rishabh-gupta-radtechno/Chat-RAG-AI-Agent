@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # Ollama
     ollama_base_url: str = "http://localhost:11434"
     ollama_chat_model: str = "qwen3:8b"
-    ollama_embedding_model: str = "nomic-embed-text"
+    ollama_embedding_model: str = "bge-m3"
     ollama_embeddings_path: str = "/api/embeddings"
     ollama_timeout_seconds: int = 120
     ollama_num_ctx: int = 4096  # must be larger than the largest prompt sent
@@ -50,8 +50,8 @@ class Settings(BaseSettings):
     max_upload_size: int = 104857600  # 100MB
 
     # Embedding
-    embedding_model: str = "nomic-embed-text"
-    embedding_dimension: int = 768
+    embedding_model: str = "bge-m3"
+    embedding_dimension: int = 1024
     chunk_size: int = 1024
     chunk_overlap: int = 128
     pdf_chunk_size: int = 450

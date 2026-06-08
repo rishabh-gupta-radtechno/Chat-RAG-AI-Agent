@@ -73,7 +73,6 @@ class ChatService:
             )
 
             retrieval_query, embed_query = await self._build_retrieval_query(message, history)
-            translated_query = embed_query if self._contains_devanagari(message) else ""
 
             # Retrieve relevant documents
             documents = await self.rag_pipeline.retrieve(retrieval_query, user_id=user_id, embed_query=embed_query)
@@ -93,7 +92,6 @@ class ChatService:
                 documents=documents,
                 diagrams=diagrams,
                 history=history,
-                translated_query=translated_query,
             )
             logger.info("Agent generated response")
 
@@ -160,18 +158,12 @@ class ChatService:
     async def _build_retrieval_query(self, message: str, history: list) -> tuple[str, str]:
         """Expand retrieval query with recent user turns for follow-up questions.
 
-        Returns (full_query, embed_query) where embed_query is English-only for Hindi
-        input so the vector search embedding is not diluted by Devanagari tokens.
+        Returns (full_query, embed_query). bge-m3 handles multilingual queries natively
+        so the message is embedded directly without translation.
         """
         prior_questions = [turn.question.strip() for turn in history[-2:] if getattr(turn, "question", "").strip()]
         query_parts = prior_questions + [message]
-        translated_query = await self._translate_query_for_retrieval(message)
-        if translated_query and translated_query != message:
-            query_parts.append(f"English retrieval query: {translated_query}")
-            embed_query = translated_query
-        else:
-            embed_query = message
-        return "\n".join(query_parts), embed_query
+        return "\n".join(query_parts), message
 
     async def _translate_query_for_retrieval(self, message: str) -> str:
         """Translate Hindi/Devanagari questions to English for retrieval.
@@ -212,17 +204,9 @@ Question:
         documents: list[dict],
         diagrams: list[dict],
         history: list,
-        translated_query: str = "",
     ) -> dict:
-        """Generate an answer with retrieved docs and recent conversation context.
-
-        translated_query: English translation of a Hindi message, used for term-based
-        matching against English document chunks when the original message has no
-        extractable ASCII terms.
-        """
-        # For Hindi questions, use the English translation for term-based extraction
-        # since all indexed document text is English.
-        terms_source = translated_query if (translated_query and not self._important_terms(message)) else message
+        """Generate an answer with retrieved docs and recent conversation context."""
+        terms_source = message
 
         extraction_documents = documents + [
             {
@@ -303,10 +287,12 @@ Related diagrams:
             top_p=0.9,
         )
 
-        if not self._validate_answer_grounding(answer, documents):
-            logger.warning("Answer not grounded in retrieved documents")
-            answer = self._not_found_answer(message)
-        elif self._contains_devanagari(message) and not self._contains_devanagari(answer):
+        # Grounding check temporarily disabled — use retrieval score logs to diagnose quality
+        # if not self._validate_answer_grounding(answer, documents):
+        #     logger.warning("Answer not grounded in retrieved documents")
+        #     answer = self._not_found_answer(message)
+
+        if self._contains_devanagari(message) and not self._contains_devanagari(answer):
             # Model ignored the language instruction — translate as fallback
             answer = await self._localize_answer(message, answer)
 

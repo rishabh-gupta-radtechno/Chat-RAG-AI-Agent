@@ -147,6 +147,28 @@ class TextProcessor:
 
         return "\n".join(text_lines).strip()
 
+    # Page types that add no retrieval value — skipped entirely at ingest
+    _SKIP_PAGE_TYPES = {"cover", "contact", "revision", "copyright", "catalog"}
+
+    @staticmethod
+    def _detect_page_type(text: str, page_number: int) -> str:
+        t = (text or "").lower()
+        words = len(t.split())
+
+        if page_number <= 2 and words < 80:
+            return "cover"
+        if re.search(r"\btable\s+of\s+contents?\b|\bcontents\b", t) and words < 600:
+            return "toc"
+        if re.search(r"\brevision\s+(history|record)\b|\bamendment\s+record\b|\bversion\s+history\b", t):
+            return "revision"
+        if re.search(r"\bcopyright\b|©|\ball\s+rights?\s+reserved\b", t) and words < 250:
+            return "copyright"
+        if re.search(r"\bcontact\b.{0,40}\b(us|information|details)\b|\b(phone|tel|fax|email)\b.{0,60}\b(address|office)\b", t) and words < 300:
+            return "contact"
+        if re.search(r"\bcatalog(?:ue)?\b|\bpart\s+(number|no)\.?\s+list\b", t) and words < 400:
+            return "catalog"
+        return "content"
+
     def build_pdf_chunks(self, page_documents: list[dict], file_name: str) -> list[dict]:
         """Create metadata-rich chunks for a PDF with page-aware sections."""
         chunks: list[dict] = []
@@ -175,6 +197,12 @@ class TextProcessor:
 
         for page in page_documents:
             page_number = page.get("page_number", 0)
+            page_text = page.get("native_text") or page.get("ocr_text") or ""
+            page_type = self._detect_page_type(page_text, page_number)
+
+            if page_type in self._SKIP_PAGE_TYPES:
+                continue
+
             document_page_number = self.extract_document_page_number(page.get("native_text", ""))
             section_counters = {
                 "text": 0,
@@ -194,6 +222,7 @@ class TextProcessor:
                             "page_number": page_number,
                             "document_page_number": document_page_number,
                             "content_type": "text",
+                            "page_type": page_type,
                             "chunk_id": f"{file_name}|page{page_number}|text|{section_counters['text']:03d}",
                         },
                     )
@@ -209,6 +238,7 @@ class TextProcessor:
                             "page_number": page_number,
                             "document_page_number": document_page_number,
                             "content_type": "ocr",
+                            "page_type": page_type,
                             "chunk_id": f"{file_name}|page{page_number}|ocr|{section_counters['ocr']:03d}",
                         },
                     )
@@ -223,6 +253,7 @@ class TextProcessor:
                             "page_number": page_number,
                             "document_page_number": document_page_number,
                             "content_type": "table",
+                            "page_type": page_type,
                             "chunk_id": f"{file_name}|page{page_number}|table|{table_index:03d}.{part_index:02d}",
                         },
                     )
@@ -239,6 +270,7 @@ class TextProcessor:
                         "page_number": page_number,
                         "document_page_number": document_page_number,
                         "content_type": "diagram",
+                        "page_type": page_type,
                         "image_index": diagram.get("image_index"),
                         "diagram_description": description,
                         "diagram_ocr_text": diagram.get("ocr_text", "").strip(),

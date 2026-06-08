@@ -211,8 +211,16 @@ class RAGPipeline:
             )
 
             logger.info(f"Retrieved {len(documents)} documents after reranking")
-            for doc in documents:
-                logger.debug(f"Doc: {doc.get('content_type')} page {doc.get('page_number')} score {doc.get('relevance_score', 0):.3f} text: {doc.get('chunk_text', '')[:100]}...")
+            logger.info("Retrieval scores for query: %s", embed_text[:120])
+            for i, doc in enumerate(documents[:5], 1):
+                logger.info(
+                    "  #%d  score=%.3f  %s  page %s  (%s)",
+                    i,
+                    doc.get("relevance_score", 0.0),
+                    doc.get("filename", "unknown"),
+                    doc.get("page_number", "?"),
+                    doc.get("content_type", "?"),
+                )
 
             return documents
 
@@ -403,7 +411,11 @@ class RAGPipeline:
             "diagram": 0.0,
         }.get(document.get("content_type"), 0.0)
 
-        return (lexical_score * 2.0) + semantic_score + content_bonus
+        page_type_penalty = {
+            "toc": 0.3,
+        }.get(document.get("page_type", "content"), 0.0)
+
+        return (semantic_score * 2.0) + lexical_score + content_bonus - page_type_penalty
 
     def _embed_locally(self, text: str) -> list[float]:
         """Generate embeddings using local sentence-transformers model."""

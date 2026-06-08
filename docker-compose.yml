@@ -70,7 +70,7 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_CHAT_MODEL=qwen3:8b
       - OLLAMA_EMBEDDINGS_PATH=/api/embeddings
-      - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+      - OLLAMA_EMBEDDING_MODEL=bge-m3
       - OLLAMA_TIMEOUT_SECONDS=600
       - OLLAMA_NUM_CTX=4096
       - OLLAMA_NUM_PREDICT=-1
