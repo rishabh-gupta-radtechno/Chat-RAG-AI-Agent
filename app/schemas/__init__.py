@@ -124,6 +124,7 @@ class SourceReference(BaseModel):
     document_page_number: Optional[int] = None
     content_type: Optional[str] = None
     excerpt: Optional[str] = None
+    page_answer: Optional[str] = None
 
 
 class DiagramReference(BaseModel):

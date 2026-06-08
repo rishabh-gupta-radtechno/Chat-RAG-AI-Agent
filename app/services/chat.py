@@ -107,6 +107,7 @@ class ChatService:
                     document_page_number=doc.get("document_page_number"),
                     content_type=doc.get("content_type"),
                     excerpt=self._excerpt(doc.get("chunk_text", "")),
+                    page_answer=doc.get("chunk_text", ""),
                 )
                 for doc in documents
             ]
