@@ -108,7 +108,7 @@ class ChatService:
                     page_number=doc.get("page_number", 0) or 0,
                     document_page_number=doc.get("document_page_number"),
                     content_type=doc.get("content_type"),
-                    excerpt=self._excerpt(doc.get("chunk_text", "")),
+                    excerpt=doc.get("chunk_text", ""),  # TEMP: full chunk text
                 )
                 for doc in documents
             ]
@@ -303,13 +303,7 @@ Related diagrams:
             top_p=0.9,
         )
 
-        is_grounded = self._validate_answer_grounding(answer, documents)
-        has_citation = (
-            "do not provide enough information" in answer.lower()
-            or bool(re.search(r"\bpage\s+\d+\b|\(page\s+\d+\)", answer, re.IGNORECASE))
-            or not self._important_terms(answer)
-        )
-        if not is_grounded or not has_citation:
+        if not self._validate_answer_grounding(answer, documents):
             logger.warning("Answer not grounded in retrieved documents")
             answer = self._not_found_answer(message)
         elif self._contains_devanagari(message) and not self._contains_devanagari(answer):
