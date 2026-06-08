@@ -2,6 +2,7 @@
 Ollama LLM client for local model inference.
 """
 
+import re
 import httpx
 import time
 from typing import Optional
