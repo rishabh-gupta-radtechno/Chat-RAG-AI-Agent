@@ -195,6 +195,7 @@ Question:
                 system="You translate search queries into English. Return only the translated query.",
                 temperature=0.0,
                 top_p=0.8,
+                num_predict=64,
             )
             translated = re.sub(r"\s+", " ", translated or "").strip().strip('"')
             if not translated:
@@ -259,7 +260,13 @@ Question:
                 "thinking": f"Found {len(documents)} retrieved chunks, but none provided enough direct evidence.",
             }
 
-        context = self.agent._format_context(documents)
+        is_hindi = self._contains_devanagari(message)
+        # For Hindi, use a tighter context window to reduce LLM processing time.
+        # Hindi Devanagari uses more tokens per word than English, so allow more output tokens.
+        context = self.agent._format_context(
+            documents,
+            max_chars=4000 if is_hindi else settings.rag_context_max_chars,
+        )
         diagram_context = self._format_diagram_context(diagrams)
         history_lines = []
         for turn in history:

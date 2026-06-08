@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     ollama_embeddings_path: str = "/api/embeddings"
     ollama_timeout_seconds: int = 120
     ollama_num_ctx: int = 4096
-    ollama_num_predict: int = 512
+    ollama_num_predict: int = -1
 
     # File Upload
     upload_dir: str = "static/uploads"

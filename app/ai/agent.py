@@ -4,6 +4,7 @@ Lightweight RAG answer agent.
 
 import re
 from enum import Enum
+from typing import Optional
 
 from app.ai.llm import OllamaClient
 from app.core.config import get_settings
@@ -62,17 +63,18 @@ class ReActAgent:
             logger.error(f"Error in ReAct agent: {e}")
             raise
 
-    def _format_context(self, documents: list[dict]) -> str:
+    def _format_context(self, documents: list[dict], max_chars: Optional[int] = None) -> str:
         """Format retrieved chunks while keeping the prompt small enough for local LLMs."""
         context_parts = []
         total_chars = 0
+        char_limit = max_chars or settings.rag_context_max_chars
 
         for index, doc in enumerate(documents[: settings.rag_context_docs], start=1):
             chunk_text = (doc.get("chunk_text") or "").strip()
             if not chunk_text:
                 continue
 
-            remaining_chars = settings.rag_context_max_chars - total_chars
+            remaining_chars = char_limit - total_chars
             if remaining_chars <= 0:
                 break
 
