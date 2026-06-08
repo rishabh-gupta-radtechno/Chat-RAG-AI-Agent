@@ -265,7 +265,7 @@ Question:
         # Hindi Devanagari uses more tokens per word than English, so allow more output tokens.
         context = self.agent._format_context(
             documents,
-            max_chars=4000 if is_hindi else settings.rag_context_max_chars,
+            max_chars=3000 if is_hindi else settings.rag_context_max_chars,
         )
         diagram_context = self._format_diagram_context(diagrams)
         history_lines = []

@@ -72,7 +72,7 @@ services:
       - OLLAMA_EMBEDDINGS_PATH=/api/embeddings
       - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
       - OLLAMA_TIMEOUT_SECONDS=600
-      - OLLAMA_NUM_CTX=2048
+      - OLLAMA_NUM_CTX=4096
       - OLLAMA_NUM_PREDICT=-1
       - RAG_CONTEXT_DOCS=6
       - RAG_CONTEXT_MAX_CHARS=8000
