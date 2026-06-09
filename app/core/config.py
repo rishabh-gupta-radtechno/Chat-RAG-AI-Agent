@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     # JWT
     secret_key: str = "your-super-secret-key-change-in-production"
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
-    refresh_token_expire_days: int = 7
+    access_token_expire_minutes: int = 1440
+    refresh_token_expire_days: int = 1
 
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # File Upload
     upload_dir: str = "static/uploads"
-    max_upload_size: int = 104857600  # 100MB
+    max_upload_size: int = 314572800  # 300MB
 
     # Embedding
     embedding_model: str = "nomic-embed-text"

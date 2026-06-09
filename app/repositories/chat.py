@@ -163,11 +163,28 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
             .subquery()
         )
  
+        # Get the first question and answer for each conversation
+        first_turns = (
+            select(
+                ChatHistory.conversation_id,
+                ChatHistory.question.label("first_question"),
+                ChatHistory.answer.label("first_answer"),
+            )
+            .join(
+                start_dates,
+                (ChatHistory.conversation_id == start_dates.c.conversation_id)
+                & (ChatHistory.created_at == start_dates.c.start_date),
+            )
+            .subquery()
+        )
+ 
         stmt = (
             select(
                 ChatHistory,
                 User.name,
                 start_dates.c.start_date,
+                first_turns.c.first_question,
+                first_turns.c.first_answer,
             )
             .join(User, ChatHistory.user_id == User.id)
             .join(
@@ -178,6 +195,10 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
             .join(
                 start_dates,
                 ChatHistory.conversation_id == start_dates.c.conversation_id,
+            )
+            .join(
+                first_turns,
+                ChatHistory.conversation_id == first_turns.c.conversation_id,
             )
         )
 
