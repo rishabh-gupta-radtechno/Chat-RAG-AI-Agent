@@ -46,11 +46,13 @@ class OllamaClient:
                 messages.append({"role": "system", "content": system})
             messages.append({"role": "user", "content": prompt})
 
-            logger.info(
-                "Ollama chat request model=%s prompt_chars=%s",
-                self.model,
-                len(prompt),
-            )
+            # Detailed logging of the full prompt to capture in Docker logs
+            logger.info("--- [LLM PROMPT START] ---")
+            if system:
+                logger.info(f"[SYSTEM]: {system}")
+            logger.info(f"[USER PROMPT]:\n{prompt}")
+            logger.info("--- [LLM PROMPT END] ---")
+
             response = await self.client.post(
                 f"{self.base_url.rstrip('/')}/api/chat",
                 json={

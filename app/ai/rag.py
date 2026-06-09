@@ -54,11 +54,11 @@ class RAGPipeline:
     def _initialize_reranker(self):
         """Initialize cross-encoder reranker."""
         try:
-            from sentence_transformers import CrossEncoder
-            self._reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+            from FlagEmbedding import FlagReranker
+            self._reranker = FlagReranker('BAAI/bge-reranker-v2-m3', use_fp16=True)
             logger.info("Reranking enabled")
         except ImportError:
-            logger.warning("sentence-transformers not installed, reranking disabled")
+            logger.warning("FlagEmbedding not installed, reranking disabled. Run: pip install FlagEmbedding")
             settings.enable_reranking = False
 
     async def process_document(
@@ -367,7 +367,7 @@ class RAGPipeline:
                 return documents
 
             pairs = [[query, doc.get("chunk_text", "")] for doc in documents]
-            scores = self._reranker.predict(pairs)
+            scores = self._reranker.compute_score(pairs)
             for i, score in enumerate(scores):
                 raw_score = float(score)
                 documents[i]["rerank_raw_score"] = raw_score

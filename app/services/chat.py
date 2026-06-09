@@ -183,6 +183,7 @@ Return only one concise English query. Do not answer the question.
 
 Question:
 {message}"""
+            logger.info(f"Prompt for retrieval query translation:\n{prompt}")
             translated = await self.llm_client.generate(
                 prompt,
                 system="You translate Hindi technical search queries into English. Return only the translated query.",
@@ -223,18 +224,22 @@ Question:
             if diagram_pages:
                 extracted_answer = f"{extracted_answer}\nDiagrams: {diagram_pages}."
             extracted_answer = await self._localize_answer(message, extracted_answer)
-            return {
-                "answer": extracted_answer,
-                "thinking": f"Used {min(len(documents), settings.rag_context_docs)} of {len(documents)} retrieved document chunks and {len(diagrams)} related diagrams.",
-            }
+            if self._answer_has_reference(extracted_answer, documents, diagrams):
+                return {
+                    "answer": extracted_answer,
+                    "thinking": f"Used {min(len(documents), settings.rag_context_docs)} of {len(documents)} retrieved document chunks and {len(diagrams)} related diagrams.",
+                }
+            logger.warning("Extracted answer has no reference; falling back to full answer generation.")
 
         direct_answer = self._extract_direct_answer(message, documents, diagrams)
         if direct_answer:
             direct_answer = await self._localize_answer(message, direct_answer)
-            return {
-                "answer": direct_answer,
-                "thinking": f"Used direct matching text from {len(documents)} retrieved document chunks and {len(diagrams)} related diagrams.",
-            }
+            if self._answer_has_reference(direct_answer, documents, diagrams):
+                return {
+                    "answer": direct_answer,
+                    "thinking": f"Used direct matching text from {len(documents)} retrieved document chunks and {len(diagrams)} related diagrams.",
+                }
+            logger.warning("Direct answer has no reference; falling back to full answer generation.")
 
         if not self._has_sufficient_evidence(message, documents):
             answer = "The uploaded documents do not provide enough information to answer this question."
@@ -245,6 +250,7 @@ Question:
             }
 
         context = self.agent._format_context(documents)
+        logger.debug("Exact retrieved context sent to Qwen:\n%s", context)
         diagram_context = self._format_diagram_context(diagrams)
         answer_language = "Hindi using Devanagari script" if self._contains_devanagari(message) else "the same language as the user"
         history_lines = []
@@ -253,16 +259,11 @@ Question:
             history_lines.append(f"Assistant: {turn.answer}")
         history_text = "\n".join(history_lines) if history_lines else "No previous conversation."
 
-        prompt = f"""Answer the user's latest message using the retrieved context and recent conversation.
-Required answer language: {answer_language}.
-Use the conversation history for follow-up references such as 'it', 'that', or 'the above part'.
-Answer with page numbers for important facts, using short citations like "(page 3)".
-If the required answer language is Hindi, do not answer in English except for technical names, abbreviations, units, file names, and page references.
-Prefer exact wording from the context for definitions, names, numbers, limits, and procedures.
-If related diagrams are available, include a short "Diagrams" line with their page numbers.
-If the retrieved context does not support the answer, say the uploaded documents do not provide enough information.
-Do not use outside knowledge.
-Keep the answer direct and concise.
+        prompt = f"""Answer strictly using the retrieved context.
+Answer Language: {answer_language}.
+Citations: Use [[Source N]] tags from the context.
+If Hindi is required, keep technical terms in English.
+If the context is insufficient, say you don't have enough information.
 
 Recent conversation:
 {history_text}
@@ -276,23 +277,29 @@ Retrieved context:
 Related diagrams:
 {diagram_context}"""
 
+        logger.info(f"Main Chat RAG prompt constructed for user message:\n{prompt}")
         answer = await self.llm_client.generate(
             prompt,
             system=f"You are a careful RAG assistant. Use recent chat history only as conversational context, and use the retrieved documents as the factual source of truth. Always follow the required answer language.",
-            temperature=0.2,
+            temperature=0.0,
             top_p=0.9,
         )
 
+        if self._is_yes_no_question(message) and not re.match(r"^\s*(yes|no)\b", answer, re.IGNORECASE):
+            logger.warning("Yes/no question answer is not direct; refusing to answer.")
+            answer = "The uploaded documents do not provide enough information to answer this question."
+
         # Validation: Check if answer is grounded in retrieved chunks
         is_grounded = self._validate_answer_grounding(answer, documents)
-        has_citation = "do not provide enough information" in answer.lower() or bool(
-            re.search(r"\bpage\s+\d+\b|\(page\s+\d+\)", answer, re.IGNORECASE)
-        )
-        if not is_grounded or not has_citation:
+        has_references = self._answer_has_reference(answer, documents, diagrams)
+        if not is_grounded or not has_references:
             logger.warning("Answer not grounded in retrieved documents")
             answer = "The uploaded documents do not provide enough information to answer this question."
 
         answer = await self._localize_answer(message, answer)
+        if not self._answer_has_reference(answer, documents, diagrams):
+            logger.warning("Final answer has no reference; refusing to answer.")
+            answer = "The uploaded documents do not provide enough information to answer this question."
 
         return {
             "answer": answer,
@@ -315,6 +322,7 @@ Return only the translated Hindi answer. The output must contain Devanagari char
 
 Answer:
 {answer}"""
+            logger.info(f"Prompt for answer localization/translation:\n{prompt}")
             translated = await self.llm_client.generate(
                 prompt,
                 system="You translate grounded RAG answers into Hindi. Preserve citations, units, and technical identifiers exactly.",
@@ -467,6 +475,27 @@ Answer:
     @staticmethod
     def _normalize_text(text: str) -> str:
         return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+    @staticmethod
+    def _is_yes_no_question(text: str) -> bool:
+        return bool(
+            re.match(
+                r"^\s*(is|are|do|does|did|can|could|will|would|should|am|was|were|has|have|had)\b",
+                text.strip(),
+                re.IGNORECASE,
+            )
+        )
+
+    def _answer_has_reference(self, answer: str, documents: list[dict], diagrams: list[dict]) -> bool:
+        if not answer:
+            return False
+        if self._source_page_summary(documents):
+            return True
+        if self._diagram_page_summary(diagrams):
+            return True
+        return bool(
+            re.search(r"\bpage\s+\d+\b|\(page\s+\d+\)|\bsources?:", answer, re.IGNORECASE)
+        )
 
     @staticmethod
     def _source_page_summary(documents: list[dict]) -> str:
