@@ -67,7 +67,7 @@ alembic/                # Database migrations (optional)
 - **Async**: asyncio with asyncpg
 - **Database**: PostgreSQL with SQLAlchemy
 - **Vector DB**: Qdrant
-- **LLM**: Ollama (qwen2.5:3b)
+- **LLM**: Ollama (qwen3:8b)
 - **Auth**: JWT (PyJWT + bcrypt)
 - **Validation**: Pydantic v2
 - **Container**: Docker & Docker Compose
@@ -131,13 +131,13 @@ http://localhost:8000
 ### Add models to ollama for embadding and chat, This will be in volumnes to need to get again after- docker compose down -v , and- docker-compose up -d
 1. Pull embadding model to generate embadding
 ```bash
-docker exec -it chat-rag-ollama ollama pull nomic-embed-text
+docker exec -it chat-rag-ollama ollama pull bge-m3
 ```
 
 2. Pull chat model for communication
 ```bash
-docker exec -it chat-rag-ollama ollama pull nomic-embed-text
-docker exec -it chat-rag-ollama ollama pull qwen2.5:3b
+docker exec -it chat-rag-ollama ollama pull bge-m3
+docker exec -it chat-rag-ollama ollama pull qwen3:8b
 ```
 
 
@@ -251,7 +251,7 @@ Response:
       "relevance_score": 0.87
     }
   ],
-  "model": "nomic-embed-text",
+  "model": "bge-m3",
   "thinking": "Iterations: 1\nThought: The question asks for key findings..."
 }
 ```
@@ -464,8 +464,8 @@ QDRANT_URL=http://localhost:6333
 
 # LLM
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_CHAT_MODEL=qwen2.5:3b
-OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_CHAT_MODEL=qwen3:8b
+OLLAMA_EMBEDDING_MODEL=bge-m3
 OLLAMA_EMBEDDINGS_PATH=/api/embeddings
 
 # File Upload

@@ -151,8 +151,8 @@ You should get a response with:
 
 ```bash
 # Add models to ollama for embadding and chat, This will be in volumnes to need to get again after cocker compose down -v
-docker exec -it chat-rag-ollama ollama pull nomic-embed-text
-docker exec -it chat-rag-ollama ollama pull qwen2.5:3b
+docker exec -it chat-rag-ollama ollama pull bge-m3
+docker exec -it chat-rag-ollama ollama pull qwen3:8b
 
 # Start all services
 docker-compose up -d
@@ -204,9 +204,9 @@ docker-compose exec postgres psql -U postgres -l
 # Check available models
 curl http://localhost:11434/api/tags
 
-# Pull the qwen2.5:3b model (if not present)
-docker-compose exec ollama ollama pull qwen2.5:3b
-docker-compose exec ollama ollama pull nomic-embed-text
+# Pull the qwen3:8b model (if not present)
+docker-compose exec ollama ollama pull qwen3:8b
+docker-compose exec ollama ollama pull bge-m3
 ```
 
 ### Qdrant collection error
@@ -274,8 +274,8 @@ Key variables in `.env`:
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/chat_rag_db
 QDRANT_URL=http://localhost:6333
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_CHAT_MODEL=qwen2.5:3b
-OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_CHAT_MODEL=qwen3:8b
+OLLAMA_EMBEDDING_MODEL=bge-m3
 OLLAMA_EMBEDDINGS_PATH=/api/embeddings
 SECRET_KEY=your-secret-key-min-32-chars
 ```

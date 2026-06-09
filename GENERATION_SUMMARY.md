@@ -371,8 +371,8 @@ DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/chat_rag_db
 SECRET_KEY=your-secret-key-min-32-chars
 QDRANT_URL=http://localhost:6333
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_CHAT_MODEL=qwen2.5:3b
-OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_CHAT_MODEL=qwen3:8b
+OLLAMA_EMBEDDING_MODEL=bge-m3
 OLLAMA_EMBEDDINGS_PATH=/api/embeddings
 ```
 
