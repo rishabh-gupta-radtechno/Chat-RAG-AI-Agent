@@ -78,6 +78,8 @@ services:
       - RAG_CONTEXT_MAX_CHARS=8000
       - DEBUG=False
       - ENV=production
+    volumes:
+      - uploads_data:/app/static/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,6 +116,7 @@ volumes:
   qdrant_data:
   ollama_data:
   redis_data:
+  uploads_data:
 
 networks:
   chat-rag-network:
