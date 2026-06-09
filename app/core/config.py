@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     vector_search_top_k: int = 5
     similarity_threshold: float = 0.5
     retrieval_neighbor_pages: int = 1
-    rag_context_docs: int = 6
+    rag_context_docs: int = 3
     rag_context_max_chars: int = 8000
 
     # Logging

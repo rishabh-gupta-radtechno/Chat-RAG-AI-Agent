@@ -63,37 +63,32 @@ class ReActAgent:
             raise
 
     def _format_context(self, documents: list[dict]) -> str:
-        """Format retrieved chunks while keeping the prompt small enough for local LLMs."""
-        context_parts = []
-        total_chars = 0
+        """Format the single most relevant retrieved chunk for the local LLM."""
+        top_document = next((doc for doc in documents if doc.get("chunk_text")), None)
+        if not top_document:
+            logger.info("No chunk text available for context formatting")
+            return ""
 
-        for index, doc in enumerate(documents[: settings.rag_context_docs], start=1):
-            chunk_text = (doc.get("chunk_text") or "").strip()
-            if not chunk_text:
-                continue
+        chunk_text = (top_document.get("chunk_text") or "").strip()
+        if not chunk_text:
+            logger.info("Top document chunk text is empty")
+            return ""
 
-            remaining_chars = settings.rag_context_max_chars - total_chars
-            if remaining_chars <= 0:
-                break
+        filename = top_document.get("filename", "Unknown")
+        page_number = top_document.get("page_number", 0)
+        document_page_number = top_document.get("document_page_number")
+        content_type = top_document.get("content_type", "text")
+        chunk = chunk_text[: settings.rag_context_max_chars]
+        page_label = f"page {page_number}"
+        if document_page_number and document_page_number != page_number:
+            page_label = f"page {page_number}, document page {document_page_number}"
+        context = f"[[Source 1]] (File: {filename}, {page_label}):\n{chunk}"
 
-            filename = doc.get("filename", "Unknown")
-            page_number = doc.get("page_number", 0)
-            document_page_number = doc.get("document_page_number")
-            content_type = doc.get("content_type", "text")
-            chunk = chunk_text[:remaining_chars]
-            page_label = f"page {page_number}"
-            if document_page_number and document_page_number != page_number:
-                page_label = f"page {page_number}, document page {document_page_number}"
-            context_part = f"Source {index} ({filename}, {page_label}, {content_type}):\n{chunk}"
-            context_parts.append(context_part)
-            total_chars += len(chunk)
-
-        context = "\n\n".join(context_parts)
         logger.info(
-            "Observation generated from %s documents, context_chars=%s",
-            len(documents),
+            "Observation generated from top document only, context_chars=%s",
             len(context),
         )
+        logger.info("Exact Qwen context sent from agent:_format_context:\n%s", context)
         return context
 
     def _extract_procedure_answer(self, question: str, documents: list[dict]) -> str:
@@ -415,11 +410,9 @@ class ReActAgent:
         """Respond step: Generate final answer."""
         try:
             if state.get("observation"):
-                prompt = f"""Answer the question using only the provided context.
-The question may contain grammar mistakes. Match the important technical terms.
-If the context contains a section heading that matches the question, summarize the steps under that section.
-Only say the uploaded documents do not provide enough information when no relevant section or details are present.
-Keep the answer direct and concise, using numbered steps when the context describes a procedure.
+                prompt = f"""Answer the question strictly using the provided context.
+Cite sources as [[Source N]]. If multiple sources apply, cite all.
+If the information is missing, state that the documents do not provide enough information.
 
 Question: {state['question']}
 
@@ -430,10 +423,12 @@ Context:
 
 No relevant uploaded document context was found. Say that the uploaded documents do not provide enough information."""
 
+            logger.info(f"Agent generating response with prompt:\n{prompt}")
+
             answer = await self.llm_client.generate(
                 prompt,
                 system="You are a careful RAG assistant. Do not invent facts.",
-                temperature=0.2,
+                temperature=0.0,
                 top_p=0.9,
             )
             state["answer"] = answer
