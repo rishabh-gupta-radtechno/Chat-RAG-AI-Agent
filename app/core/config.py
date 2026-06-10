@@ -54,8 +54,8 @@ class Settings(BaseSettings):
     embedding_dimension: int = 1024
     chunk_size: int = 1024
     chunk_overlap: int = 128
-    pdf_chunk_size: int = 450
-    pdf_chunk_overlap: int = 80
+    pdf_chunk_size: int = 350  # Reduced from 450 for better precision in manual sections
+    pdf_chunk_overlap: int = 50  # Reduced from 80 to 50 for optimal overlap
 
     # PDF Processing
     use_docling: bool = True  # Use Docling for advanced PDF processing
@@ -65,18 +65,21 @@ class Settings(BaseSettings):
     ocr_full_page: bool = True
     ocr_full_page_min_text_chars: int = 80
     ocr_full_page_dpi: int = 300
-    enable_bm25_search: bool = False
-    enable_reranking: bool = False
-    rerank_top_k: int = 10
+    enable_bm25_search: bool = True  # Enable BM25 for keyword matching on manuals
+    enable_reranking: bool = True  # Enable cross-encoder reranking for better relevance
+    rerank_top_k: int = 3  # Rerank to top 3 after retrieving more candidates
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"  # Better reranker for manuals
     embedding_model_local: str = "paraphrase-multilingual-mpnet-base-v2"
     use_local_embeddings: bool = False
 
-    # RAG
-    vector_search_top_k: int = 5
+    # RAG Retrieval Strategy - Hybrid search with heavy reranking
+    vector_search_top_k: int = 5  # Retrieve 5 candidates before reranking
     similarity_threshold: float = 0.5
     retrieval_neighbor_pages: int = 1
-    rag_context_docs: int = 6
-    rag_context_max_chars: int = 8000
+    rag_context_docs: int = 5  # Final docs to use (reduced from 6, will be reranked)
+    rag_context_max_chars: int = 3000
+    semantic_weight: float = 0.5  # Weight for semantic/vector search (50%)
+    bm25_weight: float = 0.5  # Weight for BM25 keyword search (50%)
 
     # Logging
     log_level: str = "INFO"

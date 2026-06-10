@@ -170,7 +170,7 @@ class TextProcessor:
         return "content"
 
     def build_pdf_chunks(self, page_documents: list[dict], file_name: str) -> list[dict]:
-        """Create metadata-rich chunks for a PDF with page-aware sections."""
+        """Create metadata-rich chunks for a PDF with page-aware sections and title boosting."""
         chunks: list[dict] = []
         seen_chunk_ids: set[str] = set()
 
@@ -213,35 +213,44 @@ class TextProcessor:
 
             if page.get("native_text"):
                 native_text = self.clean_pdf_page_text(page["native_text"])
+                # Extract section titles for boosting (numbered headings or ALL CAPS)
+                section_title = self._extract_section_title(native_text)
+                
                 for chunk_text in self.chunk_text_by_words(native_text):
                     section_counters["text"] += 1
-                    _add_chunk(
-                        chunk_text,
-                        {
-                            "file_name": file_name,
-                            "page_number": page_number,
-                            "document_page_number": document_page_number,
-                            "content_type": "text",
-                            "page_type": page_type,
-                            "chunk_id": f"{file_name}|page{page_number}|text|{section_counters['text']:03d}",
-                        },
-                    )
+                    metadata = {
+                        "file_name": file_name,
+                        "page_number": page_number,
+                        "document_page_number": document_page_number,
+                        "content_type": "text",
+                        "page_type": page_type,
+                        "chunk_id": f"{file_name}|page{page_number}|text|{section_counters['text']:03d}",
+                    }
+                    # Add section title for metadata-based boosting
+                    if section_title:
+                        metadata["section_title"] = section_title
+                    
+                    _add_chunk(chunk_text, metadata)
 
             include_ocr = page.get("ocr_text") and not page.get("native_text")
             if include_ocr:
-                for chunk_text in self.chunk_text_by_words(page["ocr_text"]):
+                ocr_text = page["ocr_text"]
+                section_title = self._extract_section_title(ocr_text)
+                
+                for chunk_text in self.chunk_text_by_words(ocr_text):
                     section_counters["ocr"] += 1
-                    _add_chunk(
-                        chunk_text,
-                        {
-                            "file_name": file_name,
-                            "page_number": page_number,
-                            "document_page_number": document_page_number,
-                            "content_type": "ocr",
-                            "page_type": page_type,
-                            "chunk_id": f"{file_name}|page{page_number}|ocr|{section_counters['ocr']:03d}",
-                        },
-                    )
+                    metadata = {
+                        "file_name": file_name,
+                        "page_number": page_number,
+                        "document_page_number": document_page_number,
+                        "content_type": "ocr",
+                        "page_type": page_type,
+                        "chunk_id": f"{file_name}|page{page_number}|ocr|{section_counters['ocr']:03d}",
+                    }
+                    if section_title:
+                        metadata["section_title"] = section_title
+                    
+                    _add_chunk(chunk_text, metadata)
 
             for table_index, table in enumerate(page.get("tables", []), start=1):
                 table_chunks = self.chunk_table_text(self.render_table_to_text(table), table)
@@ -278,6 +287,41 @@ class TextProcessor:
                         "chunk_id": f"{file_name}|page{page_number}|diagram|{section_counters['diagram']:03d}",
                     },
                 )
+
+        return chunks
+
+    @staticmethod
+    def _extract_section_title(text: str) -> Optional[str]:
+        """Extract the first heading from text for metadata boosting.
+        
+        Looks for:
+        - Numbered section headings (1.2.3 TITLE)
+        - ALL CAPS headings
+        - Lines starting with patterns like "CHAPTER", "SECTION"
+        """
+        if not text:
+            return None
+        
+        lines = text.strip().split('\n')
+        for line in lines[:5]:  # Check first 5 lines
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Numbered heading (e.g., "2.3 REASSEMBLY OF VTA VALVE")
+            numbered_match = re.match(r'^(\d+(?:\.\d+)*)\s+(.+)$', line)
+            if numbered_match:
+                return numbered_match.group(2).strip()
+            
+            # ALL CAPS heading
+            if line.isupper() and len(line.split()) >= 2:
+                return line
+            
+            # Section keywords
+            if re.match(r'^(CHAPTER|SECTION|PROCEDURE|STEP|ASSEMBLY|DISASSEMBLY|REASSEMBLY|OVERHAUL)\b', line, re.IGNORECASE):
+                return line
+        
+        return None
 
         return chunks
 

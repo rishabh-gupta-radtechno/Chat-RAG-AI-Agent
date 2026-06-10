@@ -52,13 +52,17 @@ class RAGPipeline:
             settings.enable_bm25_search = False
 
     def _initialize_reranker(self):
-        """Initialize cross-encoder reranker."""
+        """Initialize cross-encoder reranker using BAAI bge-reranker model."""
         try:
             from sentence_transformers import CrossEncoder
-            self._reranker = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
-            logger.info("Reranking enabled")
+            reranker_model = getattr(settings, 'reranker_model', 'BAAI/bge-reranker-v2-m3')
+            self._reranker = CrossEncoder(reranker_model)
+            logger.info(f"Reranking enabled with model: {reranker_model}")
         except ImportError:
             logger.warning("sentence-transformers not installed, reranking disabled")
+            settings.enable_reranking = False
+        except Exception as e:
+            logger.warning(f"Failed to load reranker model {getattr(settings, 'reranker_model', 'BAAI/bge-reranker-v2-m3')}: {e}")
             settings.enable_reranking = False
 
     async def process_document(
@@ -184,7 +188,14 @@ class RAGPipeline:
             # Combine and deduplicate
             documents_by_id = {}
             for document in semantic_documents + bm25_documents + keyword_documents:
+                # Filter out diagrams from LLM context
+                if document.get("content_type") == "diagram":
+                    continue
+                
                 document_id = document.get("id")
+                if not document_id:
+                    continue
+                
                 document["lexical_score"] = self.vector_db._keyword_score(
                     self.vector_db._keyword_terms(query),
                     document.get("chunk_text", ""),
@@ -293,27 +304,60 @@ class RAGPipeline:
         limit: int,
         user_id: Optional[uuid.UUID] = None,
     ) -> list[dict]:
-        """Perform BM25 search on stored documents."""
+
         try:
             from rank_bm25 import BM25Okapi
-            # For simplicity, build BM25 on all documents (in production, cache this)
+
             all_docs = await self.vector_db._get_all_documents(
                 user_id=str(user_id) if user_id else None
             )
-            corpus = [doc.get("chunk_text", "") for doc in all_docs]
-            tokenized_corpus = [doc.split() for doc in corpus]
+
+            if not all_docs:
+                logger.warning("BM25: No documents found")
+                return []
+
+            valid_docs = []
+
+            for doc in all_docs:
+                text = (doc.get("chunk_text") or "").strip()
+
+                if text:
+                    valid_docs.append(doc)
+
+            if not valid_docs:
+                logger.warning("BM25: No valid chunks found")
+                return []
+
+            tokenized_corpus = [
+                doc["chunk_text"].split()
+                for doc in valid_docs
+            ]
+
             bm25 = BM25Okapi(tokenized_corpus)
+
             tokenized_query = query.split()
+
+            if not tokenized_query:
+                return []
+
             scores = bm25.get_scores(tokenized_query)
-            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:limit]
+
+            top_indices = sorted(
+                range(len(scores)),
+                key=lambda i: scores[i],
+                reverse=True
+            )[:limit]
+
             return [
                 {
-                    "id": all_docs[i]["id"],
-                    "relevance_score": scores[i],
-                    **all_docs[i],
+                    "id": valid_docs[i]["id"],
+                    "relevance_score": float(scores[i]),
+                    **valid_docs[i],
                 }
-                for i in top_indices if scores[i] > 0
+                for i in top_indices
+                if scores[i] > 0
             ]
+
         except Exception as e:
             logger.warning(f"BM25 search failed: {e}")
             return []
@@ -397,12 +441,21 @@ class RAGPipeline:
 
     @staticmethod
     def _combined_retrieval_score(document: dict) -> float:
+        """Combine scores from semantic, BM25, and reranking with configurable weights."""
         lexical_score = float(document.get("lexical_score") or 0.0)
         semantic_score = float(document.get("relevance_score") or 0.0)
         rerank_score = document.get("rerank_score")
 
+        # If reranker was applied, use the reranked score as the primary semantic score
         if rerank_score is not None:
             semantic_score = max(semantic_score, float(rerank_score))
+
+        # Apply configurable weights for semantic vs lexical (BM25) search
+        # For manuals: 50% semantic, 50% BM25 keyword matching
+        semantic_weight = getattr(settings, 'semantic_weight', 0.5)
+        bm25_weight = getattr(settings, 'bm25_weight', 0.5)
+        
+        combined_score = (semantic_score * semantic_weight * 2.0) + (lexical_score * bm25_weight)
 
         content_bonus = {
             "text": 0.2,
@@ -415,7 +468,7 @@ class RAGPipeline:
             "toc": 0.3,
         }.get(document.get("page_type", "content"), 0.0)
 
-        return (semantic_score * 2.0) + lexical_score + content_bonus - page_type_penalty
+        return combined_score + content_bonus - page_type_penalty
 
     def _embed_locally(self, text: str) -> list[float]:
         """Generate embeddings using local sentence-transformers model."""
@@ -427,6 +480,61 @@ class RAGPipeline:
         except ImportError:
             logger.warning("sentence-transformers not installed, falling back to Ollama")
             return self.llm_client.embed(text)  # This is async, but for simplicity
+
+    @staticmethod
+    def extract_entities_from_query(query: str) -> list[str]:
+        """Extract important entities from question for grounding check.
+        
+        For manuals, named entities like VTA, C3W2, damper piston are critical signals
+        that retrieval should find relevant content.
+        """
+        import re
+        
+        # Extract terms that look like part numbers/names (uppercase, numbers, hyphens)
+        part_numbers = re.findall(r'\b[A-Z][A-Z0-9\-]*\b', query)
+        
+        # Extract multi-word technical terms
+        words = query.split()
+        entities = part_numbers.copy()
+        
+        # Add multi-word noun phrases (simplified: words >= 3 chars)
+        for i in range(len(words) - 1):
+            if len(words[i]) >= 3 and words[i][0].isupper():
+                entities.append(words[i].lower())
+        
+        return list(set(entities))  # Deduplicate
+
+    @staticmethod
+    def validate_retrieval_grounding(query: str, documents: list[dict]) -> tuple[bool, str]:
+        """Check if retrieved documents contain relevant entities from the query.
+        
+        Returns: (is_grounded, grounding_message)
+        
+        This prevents hallucination by ensuring retrieved context actually addresses
+        the question before generating an answer.
+        """
+        if not documents or not query:
+            return False, "No documents retrieved"
+        
+        entities = RAGPipeline.extract_entities_from_query(query)
+        if not entities:
+            # If no entities to check, allow generation (generic questions)
+            return True, "No specific entities to validate"
+        
+        # Check if at least one key entity appears in retrieved chunks
+        combined_text = " ".join(
+            doc.get("chunk_text", "").lower() for doc in documents
+        )
+        
+        found_entities = [e for e in entities if e.lower() in combined_text]
+        
+        if found_entities:
+            logger.info(f"Retrieval grounded: found entities {found_entities}")
+            return True, f"Found entities: {', '.join(found_entities)}"
+        
+        # If primary entities not found, consider it ungrounded
+        logger.warning(f"Retrieval not grounded: entities {entities} not in retrieved docs")
+        return False, f"Query entities not found in retrieved context"
 
     async def health_check(self) -> dict:
         """Check health of RAG components."""

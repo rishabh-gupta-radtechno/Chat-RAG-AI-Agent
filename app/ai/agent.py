@@ -34,23 +34,52 @@ class ReActAgent:
         question: str,
         documents: list[dict],
     ) -> dict:
-        """Process question using ReAct pattern."""
+        """Process question using ReAct pattern with hallucination guard."""
         try:
-            logger.info("Starting RAG agent for question: %s", question)
+            logger.info("="*70)
+            logger.info("STARTING RAG AGENT PROCESS")
+            logger.info("="*70)
+            logger.info("Question: %s", question)
+            logger.info("Documents retrieved: %d", len(documents))
+            logger.info("="*70)
 
+            # First: Check if retrieval is grounded in question entities
+            from app.ai.rag import RAGPipeline
+            is_grounded, grounding_msg = RAGPipeline.validate_retrieval_grounding(question, documents)
+            logger.info(f"Retrieval grounding check: {grounding_msg}")
+            
             state = {
                 "question": question,
                 "documents": documents,
                 "observation": self._format_context(documents),
                 "answer": "",
+                "grounded": is_grounded,
             }
+
+            # If retrieval is not grounded, return limited answer without hallucination
+            if not is_grounded:
+                logger.warning("Retrieved documents not grounded in question entities; limiting answer")
+                state["answer"] = f"I couldn't find specific information about the requested topic in the available documents."
+                return {
+                    "answer": state.get("answer", ""),
+                    "thinking": (
+                        f"Retrieved {len(documents)} documents but none contain the specific "
+                        f"entities from the question. Preventing hallucination by not generating answer."
+                    ),
+                }
 
             extracted_answer = self._extract_procedure_answer(question, documents)
             if extracted_answer:
+                logger.info("Extracted direct procedure answer from documents")
                 state["answer"] = extracted_answer
             else:
+                logger.info("No direct procedure answer found, using LLM to generate response")
                 state = await self._respond(state)
 
+            logger.info("="*70)
+            logger.info("AGENT PROCESS COMPLETE")
+            logger.info("="*70)
+            
             return {
                 "answer": state.get("answer", ""),
                 "thinking": (
@@ -68,14 +97,19 @@ class ReActAgent:
         context_parts = []
         total_chars = 0
         char_limit = max_chars or settings.rag_context_max_chars
+        
+        logger.info("Formatting context from %d documents (max %d docs, %d char limit)", 
+                   len(documents), settings.rag_context_docs, char_limit)
 
         for index, doc in enumerate(documents[: settings.rag_context_docs], start=1):
             chunk_text = (doc.get("chunk_text") or "").strip()
             if not chunk_text:
+                logger.debug("Skipping empty chunk at index %d", index)
                 continue
 
             remaining_chars = char_limit - total_chars
             if remaining_chars <= 0:
+                logger.info("Reached character limit, stopping context formatting")
                 break
 
             filename = doc.get("filename", "Unknown")
@@ -89,11 +123,16 @@ class ReActAgent:
             context_part = f"Source {index} ({filename}, {page_label}, {content_type}):\n{chunk}"
             context_parts.append(context_part)
             total_chars += len(chunk)
+            
+            logger.debug("Added source %d: %s (%s) - chunk_length=%d", 
+                        index, filename, page_label, len(chunk))
 
         context = "\n\n".join(context_parts)
         logger.info(
-            "Observation generated from %s documents, context_chars=%s",
+            "Formatted context from %s documents: total_chars=%s, formatted_context_length=%s",
             len(documents),
+            total_chars,
+            context,
             len(context),
         )
         return context
@@ -417,6 +456,14 @@ class ReActAgent:
         """Respond step: Generate final answer."""
         try:
             if state.get("observation"):
+                logger.info("="*50)
+                logger.info("CONTEXT FOR QUESTION:")
+                logger.info("="*50)
+                logger.info("Question: %s", state['question'])
+                logger.info("-"*50)
+                logger.info("Retrieved Context:\n%s", state.get('observation', ''))
+                logger.info("-"*50)
+                
                 prompt = f"""Answer the question using only the provided context.
 The question may contain grammar mistakes. Match the important technical terms.
 If the context contains a section heading that matches the question, summarize the steps under that section.
@@ -427,10 +474,18 @@ Question: {state['question']}
 
 Context:
 {state.get('observation', '')}"""
+                
+                logger.info("="*50)
+                logger.info("FULL PROMPT SENT TO LLM:")
+                logger.info("="*50)
+                logger.info("\n%s", prompt)
+                logger.info("="*50)
             else:
                 prompt = f"""The user asked: {state['question']}
 
 No relevant uploaded document context was found. Say that the uploaded documents do not provide enough information."""
+                logger.info("No context found. Using fallback prompt.")
+                logger.info("Prompt: %s", prompt)
 
             answer = await self.llm_client.generate(
                 prompt,
@@ -439,7 +494,9 @@ No relevant uploaded document context was found. Say that the uploaded documents
                 top_p=0.9,
             )
             state["answer"] = answer
-            logger.info(f"Generated answer: {answer[:100]}...")
+            logger.info("="*50)
+            logger.info("Generated answer: %s", answer)
+            logger.info("="*50)
 
             return state
 

@@ -276,7 +276,14 @@ class VectorDBClient:
         ]
 
     @staticmethod
-    def _keyword_score(query_terms: list[str], text: str) -> float:
+    def _keyword_score(query_terms: list[str], text: str, metadata: dict = None) -> float:
+        """Score text for keyword matches with section title boosting.
+        
+        Args:
+            query_terms: List of important query terms
+            text: Document chunk text to score
+            metadata: Optional metadata dict with section_title for boosting
+        """
         raw_lines = [
             " ".join(re.findall(r"[a-z0-9]+", line.lower()))
             for line in text.splitlines()
@@ -292,6 +299,13 @@ class VectorDBClient:
 
         score = len(matched_terms) / len(query_terms)
         query_phrase = " ".join(query_terms)
+        
+        # Boost score if query phrase appears in section title
+        if metadata and query_phrase:
+            section_title = metadata.get("section_title", "").lower()
+            if section_title and query_phrase.lower() in section_title:
+                score += 0.5  # Major boost for title match
+        
         if query_phrase in normalized_text:
             score += 0.75
 
