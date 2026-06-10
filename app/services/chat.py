@@ -251,22 +251,43 @@ Question:
             documents,
             max_chars=3000 if is_hindi else settings.rag_context_max_chars,
         )
-        diagram_context = self._format_diagram_context(diagrams)
         history_lines = []
         for turn in history:
             history_lines.append(f"User: {turn.question}")
             history_lines.append(f"Assistant: {turn.answer}")
         history_text = "\n".join(history_lines) if history_lines else "No previous conversation."
 
-        prompt = f"""Answer the user's latest message using the retrieved context and recent conversation.
-Respond in the same language the user used. If the user wrote in Hindi, answer in Hindi (Devanagari script) and keep any English technical terms, abbreviations, measurements, and numbers from the source exactly as written.
-Use the conversation history for follow-up references such as 'it', 'that', or 'the above part'.
-Answer with page numbers for important facts, using short citations like "(page 3)".
-Prefer exact wording from the context for definitions, names, numbers, limits, and procedures.
-If related diagrams are available, include a short "Diagrams" line with their page numbers.
-If the retrieved context does not support the answer, say the documents do not provide enough information.
-Do not use outside knowledge.
-Keep the answer direct and concise.
+        # Fix #4: Stronger synthesis prompt
+        prompt = f"""
+You are a technical specialist.
+
+Answer ONLY using the retrieved context and recent conversation history.
+
+Do NOT use outside knowledge.
+
+Ignore:
+- OCR errors
+- repeated text
+- headers and footers
+- page decorations
+- duplicate content
+- diagram descriptions unless directly relevant
+
+If information is found across multiple sources, combine it into a single answer.
+
+If a procedure is described:
+- Use numbered steps.
+- Preserve exact values, limits, pressures, dimensions, and part numbers.
+
+If technical terms are misspelled because of OCR, use the correct technical spelling.
+
+For important facts include citations:
+(page X)
+
+Respond in {'Hindi' if is_hindi else 'English'}.
+
+If the answer cannot be determined from the context, respond:
+"The documents do not provide enough information."
 
 Recent conversation:
 {history_text}
@@ -275,10 +296,7 @@ Latest user message:
 {message}
 
 Retrieved context:
-{context}
-
-Related diagrams:
-{diagram_context}"""
+{context}"""
 
         answer = await self.llm_client.generate(
             prompt,

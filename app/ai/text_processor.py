@@ -3,6 +3,7 @@ Text processing utilities including chunking and preprocessing.
 """
 
 import re
+import math
 from typing import Dict, List, Optional
 
 from app.core.config import get_settings
@@ -59,11 +60,33 @@ class TextProcessor:
 
     @staticmethod
     def clean_text(text: str) -> str:
-        """Clean and normalize text."""
-        # Remove extra whitespace
+        """Clean and normalize general text."""
+        if not text:
+            return ""
         text = re.sub(r"\s+", " ", text)
-        # Remove special characters (keep alphanumeric, spaces, and basic punctuation)
-        text = re.sub(r"[^\w\s.,-]", "", text)
+        text = re.sub(r"[^\w\s.,\-:;()!?/']", " ", text)
+        return text.strip()
+
+    @staticmethod
+    def clean_ocr_text(text: str) -> str:
+        """Fix #1: Clean OCR before embedding. Fix #4: Remove OCR boilerplate."""
+        if not text:
+            return ""
+        
+        # Remove recurring technical manual boilerplate
+        boilerplate = [
+            r"A\s*Faiveley\s*TRANSPORT", 
+            r"oN\s*Fanveley", 
+            r"FANVELEY",
+            r"Page\s+\d+\s+of\s+\d+",
+            r"Confidential",
+            r"Proprietary"
+        ]
+        for pattern in boilerplate:
+            text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+
+        text = re.sub(r"[\|_~^\\<>\[\]{}]", " ", text) # Remove OCR symbol artifacts
+        text = re.sub(r"\s+", " ", text)
         return text.strip()
 
     @staticmethod
@@ -187,6 +210,15 @@ class TextProcessor:
             if chunk_id in seen_chunk_ids:
                 return
 
+            # Fix #6: Remove Low-Quality Chunks
+            word_count = len(chunk_text.split())
+            if word_count < 8: # Filter out fragments/noise
+                return
+            
+            # Filter chunks that are just non-alphanumeric noise
+            if not re.search(r'[a-zA-Z0-9]', chunk_text):
+                return
+
             seen_chunk_ids.add(chunk_id)
             chunks.append(
                 {
@@ -197,55 +229,35 @@ class TextProcessor:
 
         for page in page_documents:
             page_number = page.get("page_number", 0)
-            page_text = page.get("native_text") or page.get("ocr_text") or ""
-            page_type = self._detect_page_type(page_text, page_number)
+            
+            # Fix: Merge OCR and Native (Problem #1 from review)
+            native = self.clean_pdf_page_text(page.get("native_text") or "")
+            ocr = self.clean_ocr_text(page.get("ocr_text") or "")
+            
+            combined_text = f"{native}\n{ocr}".strip()
+            page_type = self._detect_page_type(combined_text, page_number)
 
             if page_type in self._SKIP_PAGE_TYPES:
                 continue
 
-            document_page_number = self.extract_document_page_number(page.get("native_text", ""))
+            document_page_number = self.extract_document_page_number(combined_text)
             section_counters = {
-                "text": 0,
-                "ocr": 0,
+                "content": 0,
                 "table": 0,
                 "diagram": 0,
             }
 
-            if page.get("native_text"):
-                native_text = self.clean_pdf_page_text(page["native_text"])
-                # Extract section titles for boosting (numbered headings or ALL CAPS)
-                section_title = self._extract_section_title(native_text)
-                
-                for chunk_text in self.chunk_text_by_words(native_text):
-                    section_counters["text"] += 1
+            if combined_text:
+                section_title = self._extract_section_title(combined_text)
+                for chunk_text in self.chunk_text_by_words(combined_text):
+                    section_counters["content"] += 1
                     metadata = {
                         "file_name": file_name,
                         "page_number": page_number,
                         "document_page_number": document_page_number,
                         "content_type": "text",
                         "page_type": page_type,
-                        "chunk_id": f"{file_name}|page{page_number}|text|{section_counters['text']:03d}",
-                    }
-                    # Add section title for metadata-based boosting
-                    if section_title:
-                        metadata["section_title"] = section_title
-                    
-                    _add_chunk(chunk_text, metadata)
-
-            include_ocr = page.get("ocr_text") and not page.get("native_text")
-            if include_ocr:
-                ocr_text = page["ocr_text"]
-                section_title = self._extract_section_title(ocr_text)
-                
-                for chunk_text in self.chunk_text_by_words(ocr_text):
-                    section_counters["ocr"] += 1
-                    metadata = {
-                        "file_name": file_name,
-                        "page_number": page_number,
-                        "document_page_number": document_page_number,
-                        "content_type": "ocr",
-                        "page_type": page_type,
-                        "chunk_id": f"{file_name}|page{page_number}|ocr|{section_counters['ocr']:03d}",
+                        "chunk_id": f"{file_name}|page{page_number}|chunk|{section_counters['content']:03d}",
                     }
                     if section_title:
                         metadata["section_title"] = section_title

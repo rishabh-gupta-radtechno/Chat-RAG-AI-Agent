@@ -83,7 +83,7 @@ class ReActAgent:
             return {
                 "answer": state.get("answer", ""),
                 "thinking": (
-                    f"Used {min(len(documents), settings.rag_context_docs)} "
+                f"Used {min(len(state.get('documents', [])), settings.rag_context_docs)} "
                     f"of {len(documents)} retrieved document chunks."
                 ),
             }
@@ -464,11 +464,28 @@ class ReActAgent:
                 logger.info("Retrieved Context:\n%s", state.get('observation', ''))
                 logger.info("-"*50)
                 
-                prompt = f"""Answer the question using only the provided context.
-The question may contain grammar mistakes. Match the important technical terms.
-If the context contains a section heading that matches the question, summarize the steps under that section.
-Only say the uploaded documents do not provide enough information when no relevant section or details are present.
-Keep the answer direct and concise, using numbered steps when the context describes a procedure.
+                # Fix #4: Stronger System Prompt
+                prompt = f"""
+You are a technical document assistant.
+
+Answer using ONLY the provided context.
+Do NOT use outside knowledge.
+
+Ignore OCR noise, repeated headers, footers, page titles, and document metadata.
+
+If information is spread across multiple sections, combine it into a single coherent answer.
+
+If the context describes a procedure:
+- Present it as numbered steps.
+- Include all relevant values, limits, pressures, dimensions, and part numbers.
+
+If technical terms appear misspelled due to OCR, use the most likely correct technical spelling.
+
+Do not copy raw OCR text.
+Rewrite it into clear professional language.
+
+If the answer cannot be determined from the provided context, respond:
+"The documents do not provide enough information."
 
 Question: {state['question']}
 
