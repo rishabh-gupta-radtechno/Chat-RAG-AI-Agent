@@ -7,7 +7,7 @@ import json
 import uuid
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ChatHistory, User
@@ -19,6 +19,31 @@ class ChatHistoryRepository(BaseRepository[ChatHistory]):
 
     def __init__(self, session: AsyncSession):
         super().__init__(session, ChatHistory)
+
+    async def count_active_users_total(self) -> int:
+        """Count distinct users who have chatted till today."""
+        stmt = select(func.count(distinct(ChatHistory.user_id)))
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
+
+    async def count_total_conversations(self) -> int:
+        """Count total distinct conversations created."""
+        stmt = select(func.count(distinct(ChatHistory.conversation_id)))
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
+
+    async def count_active_conversations_today(self) -> int:
+        """Count distinct conversations active today."""
+        today_start = datetime.combine(
+            datetime.now(timezone.utc).date(), 
+            time.min, 
+            tzinfo=timezone.utc
+        )
+        stmt = select(func.count(distinct(ChatHistory.conversation_id))).where(
+            ChatHistory.created_at >= today_start
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
 
     async def get_by_user(self, user_id: uuid.UUID, skip: int = 0, limit: int = 100) -> list[ChatHistory]:
         """Get chat history for a user."""

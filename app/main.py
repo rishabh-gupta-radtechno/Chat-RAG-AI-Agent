@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api import admin, auth, chat, files, health
+from app.api import admin, auth, chat, files, health, dashboard
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
 from app.db.database import create_all_tables
@@ -77,6 +77,7 @@ def create_app() -> FastAPI:
     app.include_router(files.router)
     app.include_router(chat.router)
     app.include_router(health.router)
+    app.include_router(dashboard.router)
 
     # Root endpoint
     @app.get("/")
