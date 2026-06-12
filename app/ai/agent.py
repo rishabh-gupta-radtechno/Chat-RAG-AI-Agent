@@ -120,11 +120,13 @@ class ReActAgent:
             page_label = f"page {page_number}"
             if document_page_number and document_page_number != page_number:
                 page_label = f"page {page_number}, document page {document_page_number}"
-            context_part = f"Source {index} ({filename}, {page_label}, {content_type}):\n{chunk}"
+            if doc.get("section_title"):
+                page_label += f", section: {doc['section_title']}"
+            score = doc.get("relevance_score", 0.0)
+            context_part = f"### Source {index} | File: {filename} | {page_label} | Score: {score:.2f}\n{chunk}\n---"
             context_parts.append(context_part)
             total_chars += len(chunk)
-            
-            logger.debug("Added source %d: %s (%s) - chunk_length=%d", 
+            logger.debug("Added source %d: %s (%s) - score=%.2f", 
                         index, filename, page_label, len(chunk))
 
         context = "\n\n".join(context_parts)
@@ -452,6 +454,17 @@ class ReActAgent:
 
         return deduped
 
+    def _detect_question_intent(self, question: str) -> str:
+        """Classify the intent to adjust the prompt stringency."""
+        q = question.lower()
+        if any(w in q for w in ["how", "step", "procedure", "install", "mount", "test"]):
+            return "PROCEDURE"
+        if any(w in q for w in ["what is", "definition", "mean", "purpose"]):
+            return "DEFINITION"
+        if any(w in q for w in ["why", "because", "consequence", "happen", "if"]):
+            return "ANALYSIS"
+        return "GENERAL"
+
     async def _respond(self, state: dict) -> dict:
         """Respond step: Generate final answer."""
         try:
@@ -464,32 +477,36 @@ class ReActAgent:
                 logger.info("Retrieved Context:\n%s", state.get('observation', ''))
                 logger.info("-"*50)
                 
-                # Fix #4: Stronger System Prompt
+                intent = self._detect_question_intent(state['question'])
+                
+                # Strict technical prompt to prevent hallucination
                 prompt = f"""
 You are a technical document assistant.
+Intent: {intent}
 
-Answer using ONLY the provided context.
+Answer ONLY using information explicitly stated in the provided context.
 Do NOT use outside knowledge.
+Do NOT infer consequences, safety implications, or operational effects unless directly mentioned.
 
-Ignore OCR noise, repeated headers, footers, page titles, and document metadata.
+If the context recommends an action but doesn't explain 'why', do not invent a reason. 
+Clearly state: "The document does not specify further details."
+
+Ignore OCR noise and document metadata.
 
 If information is spread across multiple sections, combine it into a single coherent answer.
 
-If the context describes a procedure:
-- Present it as numbered steps.
-- Include all relevant values, limits, pressures, dimensions, and part numbers.
-
-If technical terms appear misspelled due to OCR, use the most likely correct technical spelling.
-
-Do not copy raw OCR text.
-Rewrite it into clear professional language.
+Rules:
+1. Use numbered steps for procedures.
+2. Preserve exact values (pressures, dimensions, part numbers).
+3. Use professional language; do not copy raw OCR fragments.
+4. Provide page citations in the format (page X).
 
 If the answer cannot be determined from the provided context, respond:
 "The documents do not provide enough information."
 
 Question: {state['question']}
 
-Context:
+Retrieved Context:
 {state.get('observation', '')}"""
                 
                 logger.info("="*50)

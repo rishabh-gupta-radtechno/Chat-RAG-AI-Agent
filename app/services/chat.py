@@ -245,10 +245,14 @@ Question:
             }
 
         is_hindi = self._contains_devanagari(message)
+        
+        # Fix: Context Compression
+        context_compression_top_sentences = getattr(settings, 'context_compression_top_sentences', 3) # Default to 3 sentences
+        compressed_documents = await self.rag_pipeline._compress_context_for_llm(message, documents, top_sentences=context_compression_top_sentences)
+
         # For Hindi, use a tighter context window to reduce LLM processing time.
-        # Hindi Devanagari uses more tokens per word than English, so allow more output tokens.
         context = self.agent._format_context(
-            documents,
+            compressed_documents, # Use compressed documents
             max_chars=3000 if is_hindi else settings.rag_context_max_chars,
         )
         history_lines = []
@@ -261,17 +265,13 @@ Question:
         prompt = f"""
 You are a technical specialist.
 
-Answer ONLY using the retrieved context and recent conversation history.
-
+Answer ONLY using information EXPLICITLY STATED in the retrieved context.
 Do NOT use outside knowledge.
+Do NOT infer engineering consequences or safety effects unless they are directly written in the text.
 
-Ignore:
-- OCR errors
-- repeated text
-- headers and footers
-- page decorations
-- duplicate content
-- diagram descriptions unless directly relevant
+If a recommendation is made without an explanation, state: "The document does not specify the reason."
+
+Ignore: OCR errors, repeated headers/footers, and duplicate content.
 
 If information is found across multiple sources, combine it into a single answer.
 
@@ -282,7 +282,7 @@ If a procedure is described:
 If technical terms are misspelled because of OCR, use the correct technical spelling.
 
 For important facts include citations:
-(page X)
+source (page X)
 
 Respond in {'Hindi' if is_hindi else 'English'}.
 

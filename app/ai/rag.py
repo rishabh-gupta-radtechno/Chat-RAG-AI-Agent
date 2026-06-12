@@ -1,6 +1,7 @@
 """
 RAG (Retrieval-Augmented Generation) pipeline.
 """
+import collections
 
 import math
 import uuid
@@ -106,11 +107,16 @@ class RAGPipeline:
             seen_chunk_ids: set[str] = set()
             for i, chunk in enumerate(chunks):
                 try:
+                    metadata = chunk.get("metadata", {})
+                    # Prepend section title to chunk text before embedding for better context
+                    if metadata.get("section_title"):
+                        chunk["text"] = f"{metadata['section_title']}. {chunk['text']}"
+
                     if settings.use_local_embeddings:
                         embedding = self._embed_locally(chunk["text"])
                     else:
                         embedding = await self.llm_client.embed(chunk["text"])
-                    metadata = chunk.get("metadata", {})
+
                     metadata["file_id"] = str(file_id)
                     if user_id:
                         metadata["user_id"] = str(user_id)
@@ -185,29 +191,21 @@ class RAGPipeline:
                 )
             )
 
-            # Combine and deduplicate
-            documents_by_id = {}
-            for document in semantic_documents + bm25_documents + keyword_documents:
-                # Filter out diagrams from LLM context
-                if document.get("content_type") == "diagram":
-                    continue
-                
-                document_id = document.get("id")
-                if not document_id:
-                    continue
-                
-                document["lexical_score"] = self.vector_db._keyword_score(
-                    self.vector_db._keyword_terms(query),
-                    document.get("chunk_text", ""),
-                )
-                existing = documents_by_id.get(document_id)
-                if (
-                    existing is None
-                    or self._combined_retrieval_score(document) > self._combined_retrieval_score(existing)
-                ):
-                    documents_by_id[document_id] = document
+            # Merge results using Reciprocal Rank Fusion (RRF)
+            # Filter out diagrams from LLM context before RRF
+            semantic_documents = [d for d in semantic_documents if d.get("content_type") != "diagram"]
+            bm25_documents = [d for d in bm25_documents if d.get("content_type") != "diagram"]
+            keyword_documents = [d for d in keyword_documents if d.get("content_type") != "diagram"]
 
-            candidates = list(documents_by_id.values())
+            # Add lexical score to semantic documents for potential later use or logging
+            for doc in semantic_documents:
+                doc["lexical_score"] = self.vector_db._keyword_score(self.vector_db._keyword_terms(query), doc.get("chunk_text", ""), doc.get("metadata"))
+
+            candidates = self._reciprocal_rank_fusion([
+                semantic_documents,
+                bm25_documents,
+                keyword_documents,
+            ], k=60) # RRF needs a larger pool before reranking/final selection
 
             # Rerank if enabled
             if settings.enable_reranking and self._reranker:
@@ -215,7 +213,10 @@ class RAGPipeline:
             else:
                 candidates.sort(key=self._combined_retrieval_score, reverse=True)
 
-            documents = await self._add_neighbor_context(
+            # Deduplicate and take top 20 candidates (or rerank_top_k if reranking was applied)
+            final_candidates = self._deduplicate_documents(candidates[:getattr(settings, 'rerank_top_k', 20)]) # Default to 20
+
+            documents = await self._add_neighbor_context( # Add neighbor context to the top candidates
                 candidates[:top_k],
                 user_id=retrieval_user_id,
                 max_documents=settings.rag_context_docs + max(top_k, 6),
@@ -231,7 +232,7 @@ class RAGPipeline:
                     doc.get("filename", "unknown"),
                     doc.get("page_number", "?"),
                     doc.get("content_type", "?"),
-                )
+                ) # Log the documents after neighbor context
 
             return documents
 
@@ -362,6 +363,56 @@ class RAGPipeline:
             logger.warning(f"BM25 search failed: {e}")
             return []
 
+    @staticmethod
+    def _reciprocal_rank_fusion(ranked_lists: list[list[dict]], k: int = 60) -> list[dict]:
+        """
+        Performs Reciprocal Rank Fusion (RRF) on multiple ranked lists of documents.
+        
+        Args:
+            ranked_lists: A list of lists, where each inner list is a ranked list of documents.
+                          Each document is a dictionary with an 'id' key.
+            k: A constant that determines the impact of lower ranks.
+        
+        Returns:
+            A single list of documents, ranked by their RRF score.
+        """
+        fused_scores = collections.defaultdict(float)
+        document_map = {} # To store the full document object for each ID
+
+        for ranked_list in ranked_lists:
+            for rank, doc in enumerate(ranked_list):
+                doc_id = doc.get("id")
+                if doc_id is None:
+                    continue
+                
+                fused_scores[doc_id] += 1.0 / (k + rank + 1)
+                
+                # Store the document with the highest relevance_score if multiple sources
+                # or simply the first one encountered if scores are not comparable
+                if doc_id not in document_map or \
+                   doc.get("relevance_score", 0.0) > document_map[doc_id].get("relevance_score", 0.0):
+                    document_map[doc_id] = doc
+
+        # Sort documents by their fused scores in descending order
+        reranked_documents = []
+        for doc_id, score in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True):
+            doc = document_map[doc_id]
+            doc["rrf_score"] = score # Add RRF score to metadata
+            reranked_documents.append(doc)
+            
+        return reranked_documents
+
+    @staticmethod
+    def _deduplicate_documents(documents: list[dict]) -> list[dict]:
+        """Removes duplicate documents based on their 'id'."""
+        seen_ids = set()
+        deduplicated = []
+        for doc in documents:
+            if doc.get("id") not in seen_ids:
+                deduplicated.append(doc)
+                seen_ids.add(doc.get("id"))
+        return deduplicated
+
     async def _add_neighbor_context(
         self,
         documents: list[dict],
@@ -454,6 +505,10 @@ class RAGPipeline:
         # For manuals: 50% semantic, 50% BM25 keyword matching
         semantic_weight = getattr(settings, 'semantic_weight', 0.5)
         bm25_weight = getattr(settings, 'bm25_weight', 0.5)
+
+        # If RRF was applied, use its score as the primary combined score
+        if "rrf_score" in document:
+            return document["rrf_score"]
         
         combined_score = (semantic_score * semantic_weight * 2.0) + (lexical_score * bm25_weight)
 
@@ -535,6 +590,48 @@ class RAGPipeline:
         # If primary entities not found, consider it ungrounded
         logger.warning(f"Retrieval not grounded: entities {entities} not in retrieved docs")
         return False, f"Query entities not found in retrieved context"
+
+    async def _compress_context_for_llm(self, query: str, documents: list[dict], top_sentences: int = 3) -> list[dict]:
+        """
+        Compresses the context for the LLM by selecting the most relevant sentences
+        from each document chunk based on the query.
+        """
+        compressed_documents = []
+        for doc in documents:
+            chunk_text = doc.get("chunk_text", "")
+            if not chunk_text:
+                continue
+
+            sentences = re.split(r'(?<=[.!?])\s+', chunk_text)
+            if not sentences:
+                continue
+
+            # Generate embeddings for query and each sentence
+            query_embedding = await self.llm_client.embed(query)
+            sentence_embeddings = [await self.llm_client.embed(s) for s in sentences]
+
+            # Calculate cosine similarity between query and each sentence
+            similarities = []
+            for i, s_emb in enumerate(sentence_embeddings):
+                similarity = self._cosine_similarity(query_embedding, s_emb)
+                similarities.append((similarity, sentences[i]))
+            
+            # Sort sentences by similarity and select the top N
+            similarities.sort(key=lambda x: x[0], reverse=True)
+            selected_sentences = [s for score, s in similarities[:top_sentences]]
+
+            if selected_sentences:
+                compressed_text = " ".join(selected_sentences)
+                compressed_doc = doc.copy()
+                compressed_doc["chunk_text"] = compressed_text
+                compressed_documents.append(compressed_doc)
+        return compressed_documents
+
+    @staticmethod
+    def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+        dot_product = sum(v1 * v2 for v1, v2 in zip(vec1, vec2))
+        magnitude = math.sqrt(sum(v1**2 for v1 in vec1)) * math.sqrt(sum(v2**2 for v2 in vec2))
+        return dot_product / magnitude if magnitude else 0.0
 
     async def health_check(self) -> dict:
         """Check health of RAG components."""

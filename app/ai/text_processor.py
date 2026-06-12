@@ -69,21 +69,9 @@ class TextProcessor:
 
     @staticmethod
     def clean_ocr_text(text: str) -> str:
-        """Fix #1: Clean OCR before embedding. Fix #4: Remove OCR boilerplate."""
+        """Fix #1: Clean OCR before embedding."""
         if not text:
             return ""
-        
-        # Remove recurring technical manual boilerplate
-        boilerplate = [
-            r"A\s*Faiveley\s*TRANSPORT", 
-            r"oN\s*Fanveley", 
-            r"FANVELEY",
-            r"Page\s+\d+\s+of\s+\d+",
-            r"Confidential",
-            r"Proprietary"
-        ]
-        for pattern in boilerplate:
-            text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
 
         text = re.sub(r"[\|_~^\\<>\[\]{}]", " ", text) # Remove OCR symbol artifacts
         text = re.sub(r"\s+", " ", text)
@@ -171,6 +159,14 @@ class TextProcessor:
         return "\n".join(text_lines).strip()
 
     # Page types that add no retrieval value — skipped entirely at ingest
+    @staticmethod
+    def _is_low_quality(text: str) -> bool:
+        """Filter out chunks that are mostly OCR noise or gibberish."""
+        if not text or len(text) < 20:
+            return True
+        alpha_chars = sum(c.isalpha() for c in text)
+        return (alpha_chars / len(text)) < 0.4
+
     _SKIP_PAGE_TYPES = {"cover", "contact", "revision", "copyright", "catalog"}
 
     @staticmethod
@@ -210,13 +206,10 @@ class TextProcessor:
             if chunk_id in seen_chunk_ids:
                 return
 
-            # Fix #6: Remove Low-Quality Chunks
-            word_count = len(chunk_text.split())
-            if word_count < 8: # Filter out fragments/noise
-                return
-            
-            # Filter chunks that are just non-alphanumeric noise
-            if not re.search(r'[a-zA-Z0-9]', chunk_text):
+            # Filter Low-Quality OCR Chunks (already implemented in _is_low_quality)
+            # This ensures chunks with mostly noise or gibberish are skipped.
+            # Filter out noise and low-alpha OCR fragments
+            if self._is_low_quality(chunk_text):
                 return
 
             seen_chunk_ids.add(chunk_id)
@@ -236,6 +229,8 @@ class TextProcessor:
             
             combined_text = f"{native}\n{ocr}".strip()
             page_type = self._detect_page_type(combined_text, page_number)
+            
+            document_page_number = self.extract_document_page_number(combined_text)
 
             if page_type in self._SKIP_PAGE_TYPES:
                 continue
@@ -247,23 +242,12 @@ class TextProcessor:
                 "diagram": 0,
             }
 
-            if combined_text:
-                section_title = self._extract_section_title(combined_text)
-                for chunk_text in self.chunk_text_by_words(combined_text):
-                    section_counters["content"] += 1
-                    metadata = {
-                        "file_name": file_name,
-                        "page_number": page_number,
-                        "document_page_number": document_page_number,
-                        "content_type": "text",
-                        "page_type": page_type,
-                        "chunk_id": f"{file_name}|page{page_number}|chunk|{section_counters['content']:03d}",
-                    }
-                    if section_title:
-                        metadata["section_title"] = section_title
-                    
-                    _add_chunk(chunk_text, metadata)
+            # Refactor: Chunk by headings first
+            section_chunks = self._split_page_into_sections(combined_text, file_name, page_number, document_page_number, page_type)
+            for chunk_data in section_chunks:
+                _add_chunk(chunk_data["text"], chunk_data["metadata"])
 
+            # Process tables (keep existing logic)
             for table_index, table in enumerate(page.get("tables", []), start=1):
                 table_chunks = self.chunk_table_text(self.render_table_to_text(table), table)
                 for part_index, chunk_text in enumerate(table_chunks, start=1):
@@ -279,6 +263,7 @@ class TextProcessor:
                         },
                     )
 
+            # Process diagrams (keep existing logic)
             for diagram in page.get("diagrams", []):
                 section_counters["diagram"] += 1
                 description = diagram.get("description", "").strip()
@@ -300,6 +285,79 @@ class TextProcessor:
                     },
                 )
 
+        return chunks
+
+    def _split_page_into_sections(self, page_text: str, file_name: str, page_number: int, document_page_number: Optional[int], page_type: str) -> list[dict]:
+        """Splits page text into sections based on headings and then chunks them."""
+        sections_data = []
+        current_section_lines = []
+        current_section_title = None
+        current_section_number = None
+        
+        lines = page_text.splitlines()
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            section_number, section_title = self._extract_section_title_and_number(line)
+            
+            if section_title: # Found a new heading
+                # If we have accumulated text for a previous section, process it
+                if current_section_lines:
+                    sections_data.extend(self._chunk_section_text(
+                        "\n".join(current_section_lines),
+                        file_name,
+                        page_number,
+                        document_page_number,
+                        page_type,
+                        current_section_title,
+                        current_section_number
+                    ))
+                
+                # Start new section
+                current_section_title = section_title
+                current_section_number = section_number
+                current_section_lines = [line] # Include the heading in its own section
+            else:
+                current_section_lines.append(line)
+                
+        # Add the last accumulated section
+        if current_section_lines:
+            sections_data.extend(self._chunk_section_text(
+                "\n".join(current_section_lines),
+                file_name,
+                page_number,
+                document_page_number,
+                page_type,
+                current_section_title,
+                current_section_number
+            ))
+            
+        return sections_data
+
+    def _chunk_section_text(self, text: str, file_name: str, page_number: int, document_page_number: Optional[int], page_type: str, section_title: Optional[str], section_number: Optional[str]) -> list[dict]:
+        """Subdivides a section's text into smaller chunks with overlap."""
+        chunks = []
+        # Use settings.chunk_size (800) and settings.chunk_overlap (150) for subdivision
+        # These are character-based as per the user's suggestion.
+        
+        # Simple character-based splitter
+        for i in range(0, len(text), settings.chunk_size - settings.chunk_overlap):
+            chunk_text = text[i : i + settings.chunk_size]
+            if chunk_text.strip():
+                chunks.append({
+                    "text": chunk_text,
+                    "metadata": {
+                        "file_name": file_name,
+                        "page_number": page_number,
+                        "document_page_number": document_page_number,
+                        "content_type": "text_section", # Differentiate from generic 'text'
+                        "page_type": page_type,
+                        "section_title": section_title,
+                        "section_number": section_number,
+                    }
+                })
         return chunks
 
     @staticmethod
@@ -334,6 +392,28 @@ class TextProcessor:
                 return line
         
         return None
+
+    @staticmethod
+    def _extract_section_title_and_number(line: str) -> tuple[Optional[str], Optional[str]]:
+        """Extracts section number and title from a line if it's a heading."""
+        line = line.strip()
+        if not line:
+            return None, None
+
+        # Pattern for numbered headings (e.g., "1.0 INTRODUCTION", "3.2.1 SUB-SECTION TITLE")
+        numbered_match = re.match(r'^((\d+(\.\d+)*)\s+)?([A-Z0-9\s\-\/&().,]{5,})$', line)
+        if numbered_match:
+            section_number = numbered_match.group(2)
+            section_title = numbered_match.group(4).strip()
+            # Heuristic: if it's all caps or starts with a number and is relatively short, it's likely a heading
+            if line.isupper() or (section_number and len(line.split()) < 10):
+                return section_number, section_title
+        
+        # Pattern for unnumbered ALL CAPS headings (e.g., "INTRODUCTION", "GENERAL INFORMATION")
+        if line.isupper() and len(line.split()) >= 2 and len(line) > 5: # At least 2 words and reasonable length
+            return None, line
+
+        return None, None
 
         return chunks
 
