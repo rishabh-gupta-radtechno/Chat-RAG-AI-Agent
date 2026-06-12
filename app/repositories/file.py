@@ -6,7 +6,7 @@ from datetime import datetime, time, timezone
 from typing import Optional, List
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import File
@@ -18,6 +18,20 @@ class FileRepository(BaseRepository[File]):
 
     def __init__(self, session: AsyncSession):
         super().__init__(session, File)
+
+    async def count_total(self) -> int:
+        """Count total active knowledge files."""
+        stmt = select(func.count(File.id)).where(File.is_active == True)
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
+
+    async def count_synced(self) -> int:
+        """Count total active files that are synced (embedded)."""
+        stmt = select(func.count(File.id)).where(
+            (File.is_active == True) & (File.is_embedded == True)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
 
     async def get_by_user(
         self, 

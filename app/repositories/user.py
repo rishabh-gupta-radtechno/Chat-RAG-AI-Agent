@@ -6,7 +6,7 @@ from datetime import datetime, time, timezone
 from typing import Optional, List
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import User
@@ -18,6 +18,12 @@ class UserRepository(BaseRepository[User]):
 
     def __init__(self, session: AsyncSession):
         super().__init__(session, User)
+
+    async def count_total(self) -> int:
+        """Count total registered users (non-deleted)."""
+        stmt = select(func.count(User.id)).where(User.is_deleted == False)
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
 
     async def get_by_id(self, user_id: uuid.UUID) -> Optional[User]:
         """Get user by ID, excluding deleted ones."""
