@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.rag import RAGPipeline
 from app.ai.agent import ReActAgent
 from app.ai.llm import OllamaClient
+from app.ai.text_processor import TextProcessor
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.repositories.chat import ChatHistoryRepository
@@ -485,17 +486,8 @@ Answer:
         return f"page {page_number}"
 
     @staticmethod
-    def _important_terms(text: str) -> list[str]:
-        stop_words = {
-            "a", "an", "and", "are", "for", "how", "in", "is", "of", "on",
-            "or", "the", "to", "what", "when", "where", "which", "with",
-            "tell", "about", "explain", "describe", "give",
-        }
-        return [
-            term
-            for term in re.findall(r"[a-z0-9]+", text.lower())
-            if len(term) > 2 and term not in stop_words
-        ]
+    def _important_terms(text: str) -> list[str]: # Use TextProcessor's static method
+        return TextProcessor._important_terms(text)
 
     @staticmethod
     def _normalize_text(text: str) -> str:

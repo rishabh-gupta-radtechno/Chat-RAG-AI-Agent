@@ -61,7 +61,7 @@ class OllamaClient:
                     "options": {
                         "temperature": temperature,
                         "top_p": top_p,
-                        "num_ctx": settings.ollama_num_ctx,
+                    "num_ctx": settings.ollama_num_ctx, # Max context window size
                         "num_predict": num_predict or settings.ollama_num_predict,
                     },
                     "keep_alive": "10m",

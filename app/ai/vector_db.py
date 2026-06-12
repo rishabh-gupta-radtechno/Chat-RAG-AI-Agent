@@ -15,6 +15,7 @@ from qdrant_client.models import (
     PointStruct,
     VectorParams,
 )
+from app.ai.text_processor import TextProcessor
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -264,16 +265,8 @@ class VectorDBClient:
         )
 
     @staticmethod
-    def _keyword_terms(text: str) -> list[str]:
-        stop_words = {
-            "a", "an", "and", "are", "for", "how", "in", "is", "of", "on",
-            "or", "the", "to", "what", "when", "where", "which", "with",
-        }
-        return [
-            term
-            for term in re.findall(r"[a-z0-9]+", text.lower())
-            if len(term) > 2 and term not in stop_words
-        ]
+    def _keyword_terms(text: str) -> list[str]: # Use TextProcessor's static method
+        return TextProcessor._important_terms(text)
 
     @staticmethod
     def _keyword_score(query_terms: list[str], text: str, metadata: dict = None) -> float:

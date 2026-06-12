@@ -27,6 +27,7 @@ class RAGPipeline:
         self.text_processor = TextProcessor()
         self.pdf_processor = PDFProcessor()
         self._bm25_corpus = []
+        self._bm25_tokenizer = None # Store tokenizer for BM25
         self._bm25_index = None
         self._reranker = None
         self._initialized = False
@@ -45,8 +46,10 @@ class RAGPipeline:
     def _initialize_bm25(self):
         """Initialize BM25 index."""
         try:
-            from rank_bm25 import BM25Okapi
-            # For now, BM25 will be built on retrieval if needed
+            # We don't initialize BM25Okapi here, as it needs the corpus.
+            # We'll dynamically build it in _bm25_search.
+            # However, we can initialize a tokenizer if needed.
+            self._bm25_tokenizer = lambda text: text.split() # Simple whitespace tokenizer for now
             logger.info("BM25 search enabled")
         except ImportError:
             logger.warning("rank_bm25 not installed, BM25 search disabled")
@@ -328,7 +331,7 @@ class RAGPipeline:
             if not valid_docs:
                 logger.warning("BM25: No valid chunks found")
                 return []
-
+            
             tokenized_corpus = [
                 doc["chunk_text"].split()
                 for doc in valid_docs
@@ -336,7 +339,7 @@ class RAGPipeline:
 
             bm25 = BM25Okapi(tokenized_corpus)
 
-            tokenized_query = query.split()
+            tokenized_query = self._bm25_tokenizer(query) if self._bm25_tokenizer else query.split()
 
             if not tokenized_query:
                 return []
@@ -502,11 +505,11 @@ class RAGPipeline:
             semantic_score = max(semantic_score, float(rerank_score))
 
         # Apply configurable weights for semantic vs lexical (BM25) search
-        # For manuals: 50% semantic, 50% BM25 keyword matching
-        semantic_weight = getattr(settings, 'semantic_weight', 0.5)
-        bm25_weight = getattr(settings, 'bm25_weight', 0.5)
+        semantic_weight = getattr(settings, 'semantic_weight', 0.6) # Default to 60% semantic
+        bm25_weight = getattr(settings, 'bm25_weight', 0.4) # Default to 40% BM25
 
         # If RRF was applied, use its score as the primary combined score
+        # RRF score already combines different retrieval methods, so it should be prioritized.
         if "rrf_score" in document:
             return document["rrf_score"]
         
@@ -520,7 +523,7 @@ class RAGPipeline:
         }.get(document.get("content_type"), 0.0)
 
         page_type_penalty = {
-            "toc": 0.3,
+            "toc": 0.3, # Penalize Table of Contents
         }.get(document.get("page_type", "content"), 0.0)
 
         return combined_score + content_bonus - page_type_penalty
@@ -543,21 +546,26 @@ class RAGPipeline:
         For manuals, named entities like VTA, C3W2, damper piston are critical signals
         that retrieval should find relevant content.
         """
-        import re
+        # Use a more sophisticated approach to extract entities,
+        # focusing on technical terms, proper nouns, and potential part numbers.
+        # This can be enhanced with NLP libraries like spaCy for better entity recognition.
         
-        # Extract terms that look like part numbers/names (uppercase, numbers, hyphens)
-        part_numbers = re.findall(r'\b[A-Z][A-Z0-9\-]*\b', query)
+        # For now, a regex-based approach:
+        # 1. Uppercase words (potential proper nouns, acronyms, part numbers)
+        # 2. Words with numbers and hyphens (common in part numbers)
+        # 3. Quoted phrases (often specific terms)
         
-        # Extract multi-word technical terms
-        words = query.split()
-        entities = part_numbers.copy()
+        extracted_entities = []
         
-        # Add multi-word noun phrases (simplified: words >= 3 chars)
-        for i in range(len(words) - 1):
-            if len(words[i]) >= 3 and words[i][0].isupper():
-                entities.append(words[i].lower())
+        # Pattern for technical terms/part numbers (e.g., "VTA", "C3W2", "DAMPER-PISTON")
+        extracted_entities.extend(re.findall(r'\b[A-Z0-9]+(?:[\-][A-Z0-9]+)*\b', query))
         
-        return list(set(entities))  # Deduplicate
+        # Pattern for quoted phrases
+        extracted_entities.extend(re.findall(r'"([^"]*)"', query))
+        extracted_entities.extend(re.findall(r"'([^']*)'", query))
+        
+        # Filter out common stop words and single characters, convert to lowercase for consistency
+        return list(set([e.lower() for e in extracted_entities if len(e) > 1 and e.lower() not in TextProcessor._important_terms("")]))
 
     @staticmethod
     def validate_retrieval_grounding(query: str, documents: list[dict]) -> tuple[bool, str]:
@@ -582,7 +590,7 @@ class RAGPipeline:
         )
         
         found_entities = [e for e in entities if e.lower() in combined_text]
-        
+
         if found_entities:
             logger.info(f"Retrieval grounded: found entities {found_entities}")
             return True, f"Found entities: {', '.join(found_entities)}"
@@ -592,7 +600,7 @@ class RAGPipeline:
         return False, f"Query entities not found in retrieved context"
 
     async def _compress_context_for_llm(self, query: str, documents: list[dict], top_sentences: int = 3) -> list[dict]:
-        """
+        """Context Filtering and Compression Layer:
         Compresses the context for the LLM by selecting the most relevant sentences
         from each document chunk based on the query.
         """
@@ -602,19 +610,29 @@ class RAGPipeline:
             if not chunk_text:
                 continue
 
-            sentences = re.split(r'(?<=[.!?])\s+', chunk_text)
+            # Use TextProcessor's sentence splitting for consistency
+            sentences = TextProcessor.split_into_sentences(chunk_text)
             if not sentences:
                 continue
 
             # Generate embeddings for query and each sentence
-            query_embedding = await self.llm_client.embed(query)
-            sentence_embeddings = [await self.llm_client.embed(s) for s in sentences]
+            # Only embed the query once
+            query_embedding = await self.llm_client.embed(query) 
+            
+            sentence_embeddings = []
+            for s in sentences:
+                # Avoid embedding very short or noisy sentences
+                if len(s.strip()) > 10: 
+                    sentence_embeddings.append(await self.llm_client.embed(s))
+                else:
+                    sentence_embeddings.append(None) # Placeholder for short sentences
 
             # Calculate cosine similarity between query and each sentence
             similarities = []
             for i, s_emb in enumerate(sentence_embeddings):
-                similarity = self._cosine_similarity(query_embedding, s_emb)
-                similarities.append((similarity, sentences[i]))
+                if s_emb is not None:
+                    similarity = self._cosine_similarity(query_embedding, s_emb)
+                    similarities.append((similarity, sentences[i]))
             
             # Sort sentences by similarity and select the top N
             similarities.sort(key=lambda x: x[0], reverse=True)

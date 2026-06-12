@@ -121,7 +121,7 @@ class ReActAgent:
             if document_page_number and document_page_number != page_number:
                 page_label = f"page {page_number}, document page {document_page_number}"
             if doc.get("section_title"):
-                page_label += f", section: {doc['section_title']}"
+                page_label += f", section: {doc['section_title'].strip()}" # Ensure section title is stripped
             score = doc.get("relevance_score", 0.0)
             context_part = f"### Source {index} | File: {filename} | {page_label} | Score: {score:.2f}\n{chunk}\n---"
             context_parts.append(context_part)
@@ -380,18 +380,9 @@ class ReActAgent:
         return cleaned.strip()
 
     @staticmethod
-    def _important_terms(text: str) -> list[str]:
-        stop_words = {
-            "a", "an", "and", "are", "can", "could", "for", "how", "i",
-            "in", "is", "of", "on", "or", "please", "should", "the",
-            "to", "what", "when", "where", "which", "with", "you",
-            "about", "describe", "explain", "give", "tell", "why",
-        }
-        return [
-            term
-            for term in re.findall(r"[a-z0-9]+", text.lower())
-            if len(term) > 2 and term not in stop_words
-        ]
+    def _important_terms(text: str) -> list[str]: # Use TextProcessor's static method
+        from app.ai.text_processor import TextProcessor
+        return TextProcessor._important_terms(text)
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -456,13 +447,24 @@ class ReActAgent:
 
     def _detect_question_intent(self, question: str) -> str:
         """Classify the intent to adjust the prompt stringency."""
+        # Expanded intent detection for more nuanced prompt generation
         q = question.lower()
-        if any(w in q for w in ["how", "step", "procedure", "install", "mount", "test"]):
+        
+        # Procedure/Instructional questions
+        if any(w in q for w in ["how to", "step-by-step", "procedure", "install", "mount", "test", "configure", "perform", "operate", "troubleshoot"]):
             return "PROCEDURE"
-        if any(w in q for w in ["what is", "definition", "mean", "purpose"]):
+        # Definition/Explanation questions
+        if any(w in q for w in ["what is", "define", "meaning of", "purpose of", "explain", "description of"]):
             return "DEFINITION"
-        if any(w in q for w in ["why", "because", "consequence", "happen", "if"]):
+        # Causal/Analysis questions
+        if any(w in q for w in ["why", "cause of", "effect of", "consequence", "reason for", "what happens if"]):
             return "ANALYSIS"
+        # Comparison questions
+        if any(w in q for w in ["compare", "difference between", "similarities", "vs"]):
+            return "COMPARISON"
+        # Factual/Specific information questions
+        if any(w in q for w in ["what are", "list", "identify", "which", "who", "when", "where", "find"]):
+            return "FACTUAL"
         return "GENERAL"
 
     async def _respond(self, state: dict) -> dict:
@@ -480,26 +482,31 @@ class ReActAgent:
                 intent = self._detect_question_intent(state['question'])
                 
                 # Strict technical prompt to prevent hallucination
+                # Emphasize conciseness, direct answers, and structured formatting based on intent
                 prompt = f"""
 You are a technical document assistant.
-Intent: {intent}
+Your goal is to provide accurate, concise, and direct answers to the user's question,
+using ONLY the provided context.
 
-Answer ONLY using information explicitly stated in the provided context.
+User's Question Intent: {intent}
+
+Answer ONLY using information EXPLICITLY STATED in the provided context.
 Do NOT use outside knowledge.
-Do NOT infer consequences, safety implications, or operational effects unless directly mentioned.
+Do NOT infer consequences, safety implications, or operational effects unless directly and explicitly mentioned.
 
-If the context recommends an action but doesn't explain 'why', do not invent a reason. 
-Clearly state: "The document does not specify further details."
+If the context recommends an action but doesn't explain 'why', do not invent a reason; clearly state:
+"The document does not specify further details."
 
-Ignore OCR noise and document metadata.
+Ignore OCR noise, document metadata (like "Source X | File: ..."), and repeated headers/footers.
 
-If information is spread across multiple sections, combine it into a single coherent answer.
+If information is spread across multiple sections, combine it into a single, coherent, and concise answer.
 
 Rules:
-1. Use numbered steps for procedures.
-2. Preserve exact values (pressures, dimensions, part numbers).
-3. Use professional language; do not copy raw OCR fragments.
-4. Provide page citations in the format (page X).
+1. Answer ONLY the question asked. Avoid including unrelated procedures, explanations, or sections.
+2. For procedures, use numbered steps.
+3. Preserve exact values (e.g., pressures, dimensions, part numbers, model numbers).
+4. Use professional, clear language; do not copy raw OCR fragments or conversational filler.
+5. Provide page citations in the format (page X) for each distinct piece of information.
 
 If the answer cannot be determined from the provided context, respond:
 "The documents do not provide enough information."

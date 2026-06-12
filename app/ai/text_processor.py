@@ -97,6 +97,13 @@ class TextProcessor:
         return "\n".join(cleaned_lines).strip()
 
     @staticmethod
+    def split_into_sentences(text: str) -> list[str]:
+        """Splits text into individual sentences while preserving punctuation."""
+        if not text:
+            return []
+        return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+
+    @staticmethod
     def chunk_text_by_words(
         text: str,
         chunk_size: int = settings.pdf_chunk_size,
@@ -451,3 +458,17 @@ class TextProcessor:
                 row_texts.append(f"Row {row_index}: {row_text}")
             chunks.append(f"{header_text}\n" + "\n".join(row_texts))
         return chunks
+
+    @staticmethod
+    def _important_terms(text: str) -> list[str]:
+        stop_words = {
+            "a", "an", "and", "are", "can", "could", "for", "how", "i",
+            "in", "is", "of", "on", "or", "please", "should", "the",
+            "to", "what", "when", "where", "which", "with", "you",
+            "about", "describe", "explain", "give", "tell", "why",
+        }
+        return [
+            term
+            for term in re.findall(r"[a-z0-9]+", text.lower())
+            if len(term) > 2 and term not in stop_words
+        ]

@@ -401,17 +401,20 @@ class PDFProcessor:
             if image is None:
                 raise ValueError("Unable to decode image bytes")
 
-            # Convert to grayscale
+            # Convert to grayscale for better OCR performance
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-            # Denoise
+            # Denoise to remove artifacts
             denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
 
             # Adaptive thresholding for better binarization
             thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
 
-            # Upscale for better OCR
+            # Upscale for better OCR, especially for low-resolution images
             upscale = cv2.resize(thresh, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+
+            # Apply a slight blur to smooth edges, which can help OCR
+            upscale = cv2.GaussianBlur(upscale, (1, 1), 0)
 
             return Image.fromarray(upscale)
         except Exception:
