@@ -185,7 +185,7 @@ async def sync_embeddings(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error syncing embeddings: {e}")
+        logger.exception(f"Error syncing embeddings: {e!r}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error syncing embeddings",

@@ -1,7 +1,9 @@
 """
 PDF extraction pipeline for native text, images, OCR, tables, and diagram descriptions.
 """
+import hashlib
 import io
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,6 +16,16 @@ settings = get_settings()
 _PADDLE_OCR_INSTANCE = None
 _PADDLE_OCR_LOCK = threading.Lock()
 _PADDLE_OCR_UNAVAILABLE = False
+_DOCLING_UNAVAILABLE = False
+
+# OCR images are resized into this band: PaddleOCR's detector struggles with
+# tiny crops, while very large renders are slow and get shrunk internally.
+_MAX_OCR_SIDE = 2400
+_MIN_OCR_SIDE = 720
+# Embedded images smaller than this (icons, rules, bullets) carry no text.
+_MIN_EMBEDDED_IMAGE_SIDE = 50
+
+_TESSERACT_LANG_MAP = {"en": "eng", "hi": "hin", "ch": "chi_sim"}
 
 
 class PDFProcessor:
@@ -25,16 +37,25 @@ class PDFProcessor:
         self._caption_model = None
         self._caption_processor = None
         self._paddle_ocr = None  # Singleton instance to prevent PDX reinitialization
+        self._ocr_cache: Dict[str, str] = {}  # bytes-hash -> text, so each image is OCR'd once
+        self._camelot_unavailable = False
 
     def extract_page_documents(self, filepath: str, file_id: Optional[str] = None) -> list[Dict[str, Any]]:
         """Extract native text, OCR text, tables, and diagrams for each PDF page."""
+        global _DOCLING_UNAVAILABLE
+
+        self._ocr_cache.clear()
+
         # Try Docling first for better structured extraction if enabled
-        if settings.use_docling:
+        if settings.use_docling and not _DOCLING_UNAVAILABLE:
             try:
                 return self._extract_with_docling(filepath, file_id=file_id)
+            except ImportError as exc:
+                _DOCLING_UNAVAILABLE = True
+                logger.warning("Docling is not installed: %s. Using traditional extraction from now on.", exc)
             except Exception as exc:
                 logger.warning("Docling extraction failed: %s. Falling back to traditional extraction.", exc)
-        
+
         # Fallback to traditional extraction
         try:
             import pypdf
@@ -49,11 +70,9 @@ class PDFProcessor:
         pages: list[Dict[str, Any]] = []
         for page_number, native_text in enumerate(native_pages, start=1):
             page_images = images_by_page.get(page_number, [])
-            ocr_inputs = []
-            rendered_page = rendered_pages.get(page_number)
-            if rendered_page:
-                ocr_inputs.extend(rendered_page)
-            ocr_inputs.extend(page_images)
+            # A full-page render already covers every embedded image on the page,
+            # so OCR-ing the embedded images again would only duplicate text.
+            ocr_inputs = rendered_pages.get(page_number) or page_images
             ocr_text = self._extract_ocr_text(ocr_inputs)
             tables = self._extract_tables(filepath, page_number)
             diagrams = self._extract_diagrams(page_images, tables, file_id=file_id, page_number=page_number)
@@ -129,11 +148,7 @@ class PDFProcessor:
         for page_number in range(1, page_count + 1):
             native_text = " ".join(pages_text.get(page_number, []))
             page_images = images_by_page.get(page_number, [])
-            ocr_inputs: list[Dict[str, Any]] = []
-            rendered_page = rendered_pages.get(page_number)
-            if rendered_page:
-                ocr_inputs.extend(rendered_page)
-            ocr_inputs.extend(page_images)
+            ocr_inputs = rendered_pages.get(page_number) or page_images
             ocr_text = self._extract_ocr_text(ocr_inputs)
             tables = self._extract_tables(filepath, page_number)
             diagrams = self._extract_diagrams(page_images, tables, file_id=file_id, page_number=page_number)
@@ -156,8 +171,18 @@ class PDFProcessor:
         native_pages: list[str] = []
         with open(filepath, "rb") as f:
             reader = pypdf.PdfReader(f)
+            if reader.is_encrypted:
+                try:
+                    reader.decrypt("")
+                except Exception as exc:
+                    logger.warning("PDF is password-protected and could not be opened: %s", exc)
+                    return []
             for page in reader.pages:
-                native_pages.append(page.extract_text() or "")
+                try:
+                    native_pages.append(page.extract_text() or "")
+                except Exception as exc:
+                    logger.warning("pypdf failed to extract text from page %s: %s", len(native_pages) + 1, exc)
+                    native_pages.append("")
 
         try:
             import pdfplumber
@@ -191,7 +216,6 @@ class PDFProcessor:
             return {}
 
         rendered_pages: Dict[int, List[Dict[str, Any]]] = {}
-        min_text_chars = settings.ocr_full_page_min_text_chars
         zoom = settings.ocr_full_page_dpi / 72
         matrix = fitz.Matrix(zoom, zoom)
 
@@ -199,7 +223,7 @@ class PDFProcessor:
             with fitz.open(filepath) as document:
                 for page_index, page in enumerate(document):
                     native_text = native_pages[page_index] if page_index < len(native_pages) else ""
-                    if len(native_text.strip()) >= min_text_chars:
+                    if self._is_meaningful_text(native_text):
                         continue
 
                     pix = page.get_pixmap(matrix=matrix, alpha=False)
@@ -214,6 +238,21 @@ class PDFProcessor:
             logger.warning("Unable to render pages for OCR: %s", exc)
 
         return rendered_pages
+
+    @staticmethod
+    def _is_meaningful_text(text: str) -> bool:
+        """Whether a page's native text layer is real content, not CID/encoding junk.
+
+        Scanned PDFs sometimes carry a broken text layer (e.g. "(cid:12)" runs or
+        mojibake) that is long enough to pass a plain length check; such pages
+        still need full-page OCR.
+        """
+        stripped = (text or "").strip()
+        if len(stripped) < settings.ocr_full_page_min_text_chars:
+            return False
+        # Latin or Devanagari words of 3+ characters are a good proxy for prose.
+        words = re.findall(r"[A-Za-zऀ-ॿ]{3,}", stripped)
+        return len(words) >= 10
 
     def _extract_page_images(self, filepath: str) -> Dict[int, List[Dict[str, Any]]]:
         try:
@@ -232,6 +271,9 @@ class PDFProcessor:
                         xref = image_info[0]
                         try:
                             pix = fitz.Pixmap(document, xref)
+                            # Icons, rules, and bullets carry no text or diagram content.
+                            if min(pix.width, pix.height) < _MIN_EMBEDDED_IMAGE_SIDE:
+                                continue
                             if pix.n > 4:
                                 pix = fitz.Pixmap(fitz.csRGB, pix)
                             image_bytes = pix.tobytes("png")
@@ -269,16 +311,22 @@ class PDFProcessor:
         return "\n".join(ocr_texts)
 
     def _run_ocr(self, image_bytes: bytes) -> str:
+        cache_key = hashlib.sha1(image_bytes).hexdigest()
+        cached = self._ocr_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         text = ""
 
         if self._ocr_engine == "paddleocr":
             text = self._run_paddleocr(image_bytes)
-            if text:
-                return text
 
-        text = self._run_tesseract(image_bytes)
+        if not text:
+            text = self._run_tesseract(image_bytes)
         if not text:
             logger.debug("No OCR engines available or OCR processing returned no text. Proceeding without OCR.")
+
+        self._ocr_cache[cache_key] = text
         return text
 
     def _run_paddleocr(self, image_bytes: bytes) -> str:
@@ -305,12 +353,7 @@ class PDFProcessor:
                     self._paddle_ocr = _PADDLE_OCR_INSTANCE
                 elif not _PADDLE_OCR_UNAVAILABLE:
                     try:
-                        _PADDLE_OCR_INSTANCE = PaddleOCR(
-                            use_angle_cls=True,
-                            lang="en",
-                            use_gpu=False,
-                            use_space_char=True,
-                        )
+                        _PADDLE_OCR_INSTANCE = self._create_paddle_ocr(PaddleOCR)
                         self._paddle_ocr = _PADDLE_OCR_INSTANCE
                     except Exception as exc:
                         logger.warning("PaddleOCR initialization failed: %s. Falling back to Tesseract.", exc)
@@ -321,17 +364,56 @@ class PDFProcessor:
         if self._paddle_ocr is None:
             return ""
 
-        image = self._prepare_image_for_ocr(image_bytes)
+        # PaddleOCR accepts numpy arrays, paths, and raw bytes — never PIL images.
+        image = self._prepare_image_for_paddle(image_bytes)
         try:
-            results = self._paddle_ocr.ocr(image, cls=True)
+            if hasattr(self._paddle_ocr, "predict"):
+                results = self._paddle_ocr.predict(image)
+            else:
+                results = self._paddle_ocr.ocr(image, cls=True)
         except Exception as exc:
-            logger.warning("PaddleOCR inference failed: %s. Falling back to Tesseract.", exc)
+            # A single bad image must not disable PaddleOCR for the whole document.
+            logger.warning("PaddleOCR inference failed for one image: %s. Trying Tesseract for it.", exc)
             if "PDX has already been initialized" in str(exc):
                 _PADDLE_OCR_UNAVAILABLE = True
-            self._ocr_engine = "tesseract"
+                self._ocr_engine = "tesseract"
             return ""
 
         return "\n".join(self._collect_paddle_text(results))
+
+    @staticmethod
+    def _create_paddle_ocr(paddle_ocr_cls: Any) -> Any:
+        import paddleocr as paddleocr_module
+
+        lang = settings.ocr_lang or "en"
+        version = getattr(paddleocr_module, "__version__", "3")
+
+        if version.startswith("2."):
+            # PaddleOCR 2.x API. det_limit_side_len matters: the default (960)
+            # shrinks full-page renders so far that body text becomes unreadable.
+            return paddle_ocr_cls(
+                use_angle_cls=True,
+                lang=lang,
+                use_gpu=False,
+                use_space_char=True,
+                show_log=False,
+                det_limit_side_len=_MAX_OCR_SIDE,
+                det_limit_type="max",
+            )
+
+        try:
+            # enable_mkldnn=False works around a paddlepaddle 3.x oneDNN/PIR bug
+            # on Windows CPU ("ConvertPirAttribute2RuntimeAttribute not support")
+            # that otherwise fails every inference.
+            return paddle_ocr_cls(
+                lang=lang,
+                use_textline_orientation=True,
+                enable_mkldnn=False,
+                text_det_limit_side_len=_MAX_OCR_SIDE,
+                text_det_limit_type="max",
+            )
+        except (TypeError, ValueError):
+            return paddle_ocr_cls(lang=lang, use_textline_orientation=True)
 
     def _collect_paddle_text(self, results: Any) -> list[str]:
         """Normalize PaddleOCR result shapes across v2/v3 releases."""
@@ -381,16 +463,39 @@ class PDFProcessor:
             logger.warning("Tesseract or Pillow not installed, skipping fallback OCR.")
             return ""
 
+        lang = _TESSERACT_LANG_MAP.get(settings.ocr_lang or "en", settings.ocr_lang or "eng")
         try:
-            image = self._prepare_image_for_ocr(image_bytes)
+            image = self._prepare_image_for_tesseract(image_bytes)
             if isinstance(image, bytes):
                 image = Image.open(io.BytesIO(image))
-            return pytesseract.image_to_string(image, lang="eng")
+            return pytesseract.image_to_string(image, lang=lang)
         except Exception as exc:
             logger.warning("Tesseract OCR failed: %s. Skipping OCR for this image.", exc)
             return ""
 
-    def _prepare_image_for_ocr(self, image_bytes: bytes) -> Any:
+    def _prepare_image_for_paddle(self, image_bytes: bytes) -> Any:
+        """Deskew and resize for PaddleOCR, returning a numpy array.
+
+        PP-OCR models are trained on natural images, so the page is left in
+        color/grayscale: hard binarization (helpful for Tesseract) degrades
+        Paddle's text detector on photographed scans with uneven lighting.
+        """
+        try:
+            import cv2
+            import numpy as np
+
+            array = np.frombuffer(image_bytes, dtype=np.uint8)
+            image = cv2.imdecode(array, cv2.IMREAD_COLOR)
+            if image is None:
+                raise ValueError("Unable to decode image bytes")
+
+            image = self._deskew(image, cv2, np)
+            return self._resize_for_ocr(image, cv2)
+        except Exception as exc:
+            logger.debug("Paddle image preprocessing failed (%s); passing raw bytes.", exc)
+            return image_bytes
+
+    def _prepare_image_for_tesseract(self, image_bytes: bytes) -> Any:
         try:
             import cv2
             import numpy as np
@@ -401,43 +506,101 @@ class PDFProcessor:
             if image is None:
                 raise ValueError("Unable to decode image bytes")
 
-            # Convert to grayscale
+            image = self._deskew(image, cv2, np)
+            image = self._resize_for_ocr(image, cv2)
+
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-            # Denoise
-            denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
-
-            # Adaptive thresholding for better binarization
-            thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-
-            # Upscale for better OCR
-            upscale = cv2.resize(thresh, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-
-            return Image.fromarray(upscale)
+            denoised = cv2.medianBlur(gray, 3)
+            # Adaptive threshold copes with the lighting gradients of photographed
+            # pages; the block size must comfortably exceed the stroke width.
+            thresh = cv2.adaptiveThreshold(
+                denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
+            )
+            return Image.fromarray(thresh)
         except Exception:
             try:
                 from PIL import Image, ImageOps, ImageFilter
 
                 image = Image.open(io.BytesIO(image_bytes)).convert("L")
-                # Apply filters
                 image = image.filter(ImageFilter.MedianFilter(size=3))
                 image = ImageOps.autocontrast(image)
-                image = image.resize((image.width * 2, image.height * 2), Image.LANCZOS)
                 return image
             except Exception as exc:  # pragma: no cover
                 logger.warning("Fallback image preprocessing failed: %s", exc)
                 return image_bytes
+
+    @staticmethod
+    def _resize_for_ocr(image: Any, cv2: Any) -> Any:
+        """Keep the long side within [_MIN_OCR_SIDE, _MAX_OCR_SIDE]."""
+        height, width = image.shape[:2]
+        long_side = max(height, width)
+        if long_side > _MAX_OCR_SIDE:
+            scale = _MAX_OCR_SIDE / long_side
+            return cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        if long_side < _MIN_OCR_SIDE:
+            scale = min(2.0, _MIN_OCR_SIDE / long_side)
+            return cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        return image
+
+    @staticmethod
+    def _deskew(image: Any, cv2: Any, np: Any) -> Any:
+        """Straighten slightly rotated scans (phone/CamScanner pages).
+
+        Angle classification in the OCR engines only fixes 90/180° flips, not
+        the few-degree tilt that breaks line detection on skewed scans.
+        """
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            height, width = gray.shape
+            long_side = max(height, width)
+            if long_side > 1200:
+                scale = 1200 / long_side
+                small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            else:
+                small = gray
+
+            binary = cv2.threshold(small, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+            coordinates = cv2.findNonZero(binary)
+            if coordinates is None:
+                return image
+
+            angle = cv2.minAreaRect(coordinates)[-1]
+            if angle > 45:
+                angle -= 90
+            # Tiny angles are not worth a resample; big ones are usually a
+            # mis-estimate (e.g. landscape tables), so leave both alone.
+            if not 0.3 < abs(angle) <= 10:
+                return image
+
+            center = (width / 2, height / 2)
+            rotation = cv2.getRotationMatrix2D(center, angle, 1.0)
+            return cv2.warpAffine(
+                image,
+                rotation,
+                (width, height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(255, 255, 255),
+            )
+        except Exception:
+            return image
 
     def _extract_tables(self, filepath: str, page_number: int) -> list[Dict[str, Any]]:
         tables: list[Dict[str, Any]] = []
 
         table_extractors = [self._extract_tables_with_camelot, self._extract_tables_with_pdfplumber]
         for extractor in table_extractors:
+            if extractor is self._extract_tables_with_camelot and self._camelot_unavailable:
+                continue
             try:
                 extracted = extractor(filepath, page_number)
                 if extracted:
                     tables.extend(extracted)
                     break
+            except ImportError:
+                if extractor is self._extract_tables_with_camelot and not self._camelot_unavailable:
+                    self._camelot_unavailable = True
+                    logger.warning("camelot is not installed: using pdfplumber for table extraction.")
             except Exception as exc:
                 logger.warning("Table extraction with %s failed: %s", extractor.__name__, exc)
 

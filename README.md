@@ -352,7 +352,7 @@ Authorization: Bearer {access_token}
 The RAG pipeline consists of:
 
 1. **Chunking**: Text split into overlapping chunks (default: 1024 tokens, 128 overlap)
-2. **Embedding**: Each chunk embedded using Ollama (768 dimensions)
+2. **Embedding**: Each chunk embedded using Ollama (1024 dimensions)
 3. **Storage**: Vectors stored in Qdrant with metadata (filename, page, chunk text)
 4. **Retrieval**: Query embedded and compared against stored vectors
 5. **Ranking**: Top-K similar documents returned (default: 5)
@@ -474,7 +474,7 @@ MAX_UPLOAD_SIZE=52428800  # 50MB
 # Embedding
 CHUNK_SIZE=1024
 CHUNK_OVERLAP=128
-EMBEDDING_DIMENSION=768
+EMBEDDING_DIMENSION=1024
 
 # RAG
 VECTOR_SEARCH_TOP_K=5

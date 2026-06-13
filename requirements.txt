@@ -28,8 +28,9 @@ mypy
 PyMuPDF
 opencv-python-headless
 pytesseract
-paddlepaddle
-paddleocr
+# paddleocr<3 uses np.sctypes and cannot import under numpy 2.x
+paddlepaddle>=3.0
+paddleocr>=3.1
 camelot-py
 pdfplumber
 docling

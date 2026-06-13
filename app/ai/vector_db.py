@@ -27,7 +27,10 @@ class VectorDBClient:
     """Qdrant vector database client."""
 
     def __init__(self):
-        self.client = AsyncQdrantClient(url=settings.qdrant_url)
+        self.client = AsyncQdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key or None,
+        )
         self.collection_name = "documents"
         self.vector_size = settings.embedding_dimension
 
@@ -39,21 +42,52 @@ class VectorDBClient:
             collection_names = [c.name for c in collections.collections]
 
             if self.collection_name not in collection_names:
-                logger.info(f"Creating collection: {self.collection_name}")
-                await self.client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=VectorParams(
-                        size=self.vector_size,
-                        distance=Distance.COSINE,
-                    ),
-                )
-                logger.info(f"Collection created: {self.collection_name}")
+                await self._create_collection()
             else:
-                logger.info(f"Collection already exists: {self.collection_name}")
+                existing_size = await self._existing_vector_size()
+                if existing_size is not None and existing_size != self.vector_size:
+                    # A changed embedding model invalidates every stored vector.
+                    # Recreate the collection so dimensions match the new model.
+                    logger.warning(
+                        "Collection %s has vector size %s but config expects %s; recreating it.",
+                        self.collection_name,
+                        existing_size,
+                        self.vector_size,
+                    )
+                    await self.client.delete_collection(collection_name=self.collection_name)
+                    await self._create_collection()
+                else:
+                    logger.info(f"Collection already exists: {self.collection_name}")
 
         except Exception as e:
-            logger.error(f"Error initializing vector database: {e}")
+            # repr() because timeout/connection exceptions often have an empty str()
+            logger.exception(f"Error initializing vector database at {settings.qdrant_url}: {e!r}")
             raise
+
+    async def _create_collection(self) -> None:
+        logger.info(f"Creating collection: {self.collection_name} (size={self.vector_size})")
+        await self.client.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=VectorParams(
+                size=self.vector_size,
+                distance=Distance.COSINE,
+            ),
+        )
+        logger.info(f"Collection created: {self.collection_name}")
+
+    async def _existing_vector_size(self) -> Optional[int]:
+        """Return the configured vector size of the existing collection, if readable."""
+        try:
+            info = await self.client.get_collection(collection_name=self.collection_name)
+            vectors = info.config.params.vectors
+            # Single unnamed vector -> VectorParams; named vectors -> dict.
+            if isinstance(vectors, dict):
+                params = next(iter(vectors.values()), None)
+                return getattr(params, "size", None)
+            return getattr(vectors, "size", None)
+        except Exception as exc:
+            logger.warning("Could not read existing collection config: %r", exc)
+            return None
 
     async def upsert_vectors(
         self,

@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     # PDF Processing
     use_docling: bool = True  # Use Docling for advanced PDF processing
     ocr_engine: str = "paddleocr"
+    ocr_lang: str = "en"  # PaddleOCR language code; mapped to the Tesseract equivalent
     enable_diagram_captioning: bool = False
     ocr_confidence_threshold: float = 0.6
     ocr_full_page: bool = True
