@@ -184,6 +184,11 @@ class RAGPipeline:
             # Combine and deduplicate
             documents_by_id = {}
             for document in semantic_documents + bm25_documents + keyword_documents:
+                # Diagram chunks (incl. scanned-page image pointers) are surfaced
+                # via the dedicated diagram path, not as text context — keep them
+                # out of text retrieval so they never occupy a context slot.
+                if document.get("content_type") == "diagram":
+                    continue
                 document_id = document.get("id")
                 document["lexical_score"] = self.vector_db._keyword_score(
                     self.vector_db._keyword_terms(query),

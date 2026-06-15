@@ -38,5 +38,6 @@ docling
 # Improved embeddings and retrieval
 sentence-transformers
 rank-bm25
+ftfy  # repairs UTF-8/CP1252 mojibake in extracted/OCR text
 transformers
 torch

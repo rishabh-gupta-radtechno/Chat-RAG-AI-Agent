@@ -69,7 +69,11 @@ class ReActAgent:
         total_chars = 0
         char_limit = max_chars or settings.rag_context_max_chars
 
-        for index, doc in enumerate(documents[: settings.rag_context_docs], start=1):
+        # Diagrams are presented in their own block, not the text context, and
+        # must not consume the text-document budget (e.g. neighbor-added pointers).
+        text_documents = [doc for doc in documents if doc.get("content_type") != "diagram"]
+
+        for index, doc in enumerate(text_documents[: settings.rag_context_docs], start=1):
             chunk_text = (doc.get("chunk_text") or "").strip()
             if not chunk_text:
                 continue

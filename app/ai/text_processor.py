@@ -85,6 +85,59 @@ class TextProcessor:
 
         return "\n".join(cleaned_lines).strip()
 
+    # Lead characters that appear when UTF-8 text was wrongly decoded as
+    # CP1252/Latin-1 (classic "mojibake"). Non-Latin scripts never carry these.
+    _MOJIBAKE_MARKERS = ("Ã", "Â", "â")
+    # Last-resort targeted fixes (explicit codepoints) for the common sequences.
+    _MOJIBAKE_REPLACEMENTS = {
+        "Â°": "°",            # Â°  -> °
+        "â€œ": "“",      # â€œ -> "
+        "â€": "”",      # â€ -> "
+        "â€™": "’",      # â€™ -> '
+        "â€˜": "‘",      # â€˜ -> '
+        "â€“": "–",      # â€“ -> –
+        "â€”": "—",      # â€” -> —
+        "â€¦": "…",      # â€¦ -> …
+    }
+
+    @staticmethod
+    def fix_mojibake(text: str) -> str:
+        """Repair UTF-8 text that was double-encoded as CP1252/Latin-1.
+
+        e.g. ``180Â°`` -> ``180°``, ``Sheet â€" 8`` -> ``Sheet – 8``. It is a
+        no-op for clean text and for non-Latin scripts (Devanagari etc.), which
+        never contain the marker characters.
+        """
+        if not text or not any(m in text for m in TextProcessor._MOJIBAKE_MARKERS):
+            return text
+
+        # Best effort: ftfy handles mixed/partial/multi-layer mojibake correctly.
+        try:
+            import ftfy
+
+            return ftfy.fix_text(text)
+        except Exception:
+            pass
+
+        def _marker_count(value: str) -> int:
+            return sum(value.count(m) for m in TextProcessor._MOJIBAKE_MARKERS)
+
+        # Fallback: reverse a single (CP1252|Latin-1)->UTF-8 layer, kept only when
+        # it actually reduces the mojibake (so clean text is never corrupted).
+        # Both codecs are tried because the original mis-decode may have used
+        # either — Latin-1 also handles the 0x80-0x9F bytes CP1252 leaves undefined.
+        for codec in ("cp1252", "latin-1"):
+            try:
+                repaired = text.encode(codec, errors="strict").decode("utf-8", errors="strict")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+            if _marker_count(repaired) < _marker_count(text):
+                return repaired
+
+        for bad, good in TextProcessor._MOJIBAKE_REPLACEMENTS.items():
+            text = text.replace(bad, good)
+        return text
+
     @staticmethod
     def chunk_text_by_words(
         text: str,
@@ -175,7 +228,9 @@ class TextProcessor:
         seen_chunk_ids: set[str] = set()
 
         def _add_chunk(text: str, metadata: dict) -> None:
-            chunk_text = text.strip()
+            # Repair encoding mojibake so the same clean text is embedded,
+            # keyword-searched, and quoted back in answers.
+            chunk_text = self.fix_mojibake(text).strip()
             if not chunk_text:
                 return
 
@@ -260,7 +315,7 @@ class TextProcessor:
 
             for diagram in page.get("diagrams", []):
                 section_counters["diagram"] += 1
-                description = diagram.get("description", "").strip()
+                description = self.fix_mojibake(diagram.get("description", "")).strip()
                 if not description:
                     continue
                 _add_chunk(
@@ -273,7 +328,7 @@ class TextProcessor:
                         "page_type": page_type,
                         "image_index": diagram.get("image_index"),
                         "diagram_description": description,
-                        "diagram_ocr_text": diagram.get("ocr_text", "").strip(),
+                        "diagram_ocr_text": self.fix_mojibake(diagram.get("ocr_text", "")).strip(),
                         "image_url": diagram.get("image_url"),
                         "chunk_id": f"{file_name}|page{page_number}|diagram|{section_counters['diagram']:03d}",
                     },
