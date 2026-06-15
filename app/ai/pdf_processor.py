@@ -19,8 +19,10 @@ _PADDLE_OCR_UNAVAILABLE = False
 _DOCLING_UNAVAILABLE = False
 
 # OCR images are resized into this band: PaddleOCR's detector struggles with
-# tiny crops, while very large renders are slow and get shrunk internally.
-_MAX_OCR_SIDE = 2400
+# tiny crops, while very large renders are slow and memory-hungry (peak RAM
+# scales with pixel count, and a too-large page can OOM a small host). 2000px
+# on the long side keeps dense full-page tables readable while staying lean.
+_MAX_OCR_SIDE = 2000
 _MIN_OCR_SIDE = 720
 # Embedded images smaller than this (icons, rules, bullets) carry no text.
 _MIN_EMBEDDED_IMAGE_SIDE = 50
@@ -68,20 +70,46 @@ class PDFProcessor:
         rendered_pages = self._render_pages_for_ocr(filepath, native_pages)
 
         pages: list[Dict[str, Any]] = []
-        for page_number, native_text in enumerate(native_pages, start=1):
+        for page_number, raw_native_text in enumerate(native_pages, start=1):
             page_images = images_by_page.get(page_number, [])
-            # A full-page render already covers every embedded image on the page,
-            # so OCR-ing the embedded images again would only duplicate text.
-            ocr_inputs = rendered_pages.get(page_number) or page_images
-            ocr_text = self._extract_ocr_text(ocr_inputs)
-            tables = self._extract_tables(filepath, page_number)
-            diagrams = self._extract_diagrams(page_images, tables, file_id=file_id, page_number=page_number)
+            native_text, ocr_text = self._resolve_page_text(
+                raw_native_text, rendered_pages.get(page_number), page_images
+            )
+            # Surface silent content loss: an image-based page that yields no text
+            # usually means OCR failed (often out-of-memory on a large render),
+            # not that the page is blank — flag it instead of dropping it quietly.
+            if not native_text and not ocr_text and (rendered_pages.get(page_number) or page_images):
+                logger.warning(
+                    "Page %s produced no text from OCR; it will have no chunks "
+                    "(OCR may have failed, e.g. low memory).",
+                    page_number,
+                )
+            # Tables come from a real text/vector layer. Gate on whether the page
+            # HAS one (a sparse, number-heavy data table still counts), not on
+            # whether the resolved page text is meaningful prose — otherwise a
+            # digital table page with little surrounding text would skip the
+            # table pass. A truly image-based page has no layer, so it is skipped
+            # (which also avoids camelot's "page is image-based" warning).
+            tables = (
+                self._extract_tables(filepath, page_number)
+                if self._has_extractable_text_layer(raw_native_text)
+                else []
+            )
+            # Image-based page (text came from OCR) -> reuse that OCR text for the
+            # page image instead of OCR-ing it a second time in the diagram path.
+            diagrams = self._extract_diagrams(
+                page_images,
+                tables,
+                file_id=file_id,
+                page_number=page_number,
+                page_ocr_text=ocr_text if not native_text else None,
+            )
 
             pages.append(
                 {
                     "page_number": page_number,
-                    "native_text": native_text.strip(),
-                    "ocr_text": ocr_text.strip(),
+                    "native_text": native_text,
+                    "ocr_text": ocr_text,
                     "tables": tables,
                     "diagrams": diagrams,
                 }
@@ -146,17 +174,30 @@ class PDFProcessor:
 
         pages: list[Dict[str, Any]] = []
         for page_number in range(1, page_count + 1):
-            native_text = " ".join(pages_text.get(page_number, []))
+            raw_native_text = " ".join(pages_text.get(page_number, []))
             page_images = images_by_page.get(page_number, [])
-            ocr_inputs = rendered_pages.get(page_number) or page_images
-            ocr_text = self._extract_ocr_text(ocr_inputs)
-            tables = self._extract_tables(filepath, page_number)
-            diagrams = self._extract_diagrams(page_images, tables, file_id=file_id, page_number=page_number)
+            native_text, ocr_text = self._resolve_page_text(
+                raw_native_text, rendered_pages.get(page_number), page_images
+            )
+            # See note in extract_page_documents: gate tables on a real text
+            # layer (sparse data tables included), not on meaningful prose.
+            tables = (
+                self._extract_tables(filepath, page_number)
+                if self._has_extractable_text_layer(raw_native_text)
+                else []
+            )
+            diagrams = self._extract_diagrams(
+                page_images,
+                tables,
+                file_id=file_id,
+                page_number=page_number,
+                page_ocr_text=ocr_text if not native_text else None,
+            )
 
             pages.append({
                 "page_number": page_number,
-                "native_text": native_text.strip(),
-                "ocr_text": ocr_text.strip(),
+                "native_text": native_text,
+                "ocr_text": ocr_text,
                 "tables": tables,
                 "diagrams": diagrams,
             })
@@ -244,15 +285,69 @@ class PDFProcessor:
         """Whether a page's native text layer is real content, not CID/encoding junk.
 
         Scanned PDFs sometimes carry a broken text layer (e.g. "(cid:12)" runs or
-        mojibake) that is long enough to pass a plain length check; such pages
-        still need full-page OCR.
+        replacement characters) that is long enough to pass a plain length check;
+        such pages still need full-page OCR.
         """
         stripped = (text or "").strip()
         if len(stripped) < settings.ocr_full_page_min_text_chars:
             return False
+
+        # Unmapped-glyph runs: pypdf emits "(cid:NN)" when a font carries no
+        # usable encoding. That layer is unreadable however long it is.
+        if stripped.count("(cid:") >= 3:
+            return False
+
         # Latin or Devanagari words of 3+ characters are a good proxy for prose.
         words = re.findall(r"[A-Za-zऀ-ॿ]{3,}", stripped)
-        return len(words) >= 10
+        if len(words) < 10:
+            return False
+
+        # A layer drowning in U+FFFD replacement characters is corrupt.
+        if stripped.count("�") > len(words):
+            return False
+
+        return True
+
+    def _resolve_page_text(
+        self,
+        native_text: str,
+        rendered_page: Optional[List[Dict[str, Any]]],
+        page_images: List[Dict[str, Any]],
+    ) -> tuple[str, str]:
+        """Pick a page's text source: native layer first, OCR only as fallback.
+
+        Returns ``(native_text, ocr_text)`` with exactly one side populated. A
+        meaningful native layer is used as-is and the page is never OCR'd (fast
+        and exact for digital PDFs); a missing or junk layer is discarded so its
+        corrupted characters cannot reach retrieval, and the page is OCR'd.
+        """
+        native_text = (native_text or "").strip()
+        if self._is_meaningful_text(native_text):
+            return native_text, ""
+        ocr_inputs = rendered_page or page_images
+        ocr_text = self._extract_ocr_text(ocr_inputs).strip()
+        return "", ocr_text
+
+    @staticmethod
+    def _has_extractable_text_layer(text: str) -> bool:
+        """Whether a page carries a real text layer camelot/pdfplumber can mine
+        for tables.
+
+        Deliberately looser than _is_meaningful_text: a digital data table can be
+        almost all numbers with very few prose words, yet still be perfectly
+        text-based. We only reject pages with no usable layer at all — empty
+        (image-only scans) or dominated by CID/replacement-character junk.
+        """
+        stripped = (text or "").strip()
+        if len(stripped) < 20:
+            return False
+        # Unmapped-glyph runs => the layer is unreadable, not table-extractable.
+        if stripped.count("(cid:") >= 3:
+            return False
+        # More than ~5% replacement characters => corrupt layer, not usable.
+        if stripped.count("�") > len(stripped) // 20:
+            return False
+        return True
 
     def _extract_page_images(self, filepath: str) -> Dict[int, List[Dict[str, Any]]]:
         try:
@@ -405,9 +500,16 @@ class PDFProcessor:
             # enable_mkldnn=False works around a paddlepaddle 3.x oneDNN/PIR bug
             # on Windows CPU ("ConvertPirAttribute2RuntimeAttribute not support")
             # that otherwise fails every inference.
+            #
+            # The document-orientation and unwarping models are skipped: we deskew
+            # in _prepare_image_for_paddle and these scans are flat, so those two
+            # extra networks only add per-image latency (and a first-run download)
+            # without improving accuracy.
             return paddle_ocr_cls(
                 lang=lang,
                 use_textline_orientation=True,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
                 enable_mkldnn=False,
                 text_det_limit_side_len=_MAX_OCR_SIDE,
                 text_det_limit_type="max",
@@ -675,18 +777,35 @@ class PDFProcessor:
         tables: list[Dict[str, Any]],
         file_id: Optional[str],
         page_number: int,
+        page_ocr_text: Optional[str] = None,
     ) -> list[Dict[str, Any]]:
+        """Build diagram records for a page's embedded images.
+
+        When ``page_ocr_text`` is provided the page is image-based (a scan) and
+        was already OCR'd as a whole, so the embedded image *is* that page. We
+        keep the saved image for the diagram viewer but skip a second, redundant
+        OCR pass and do not re-emit the page text as a diagram chunk (it already
+        lives in the page's OCR chunk).
+        """
         diagrams: list[Dict[str, Any]] = []
         if not images:
             return diagrams
+
+        image_based = page_ocr_text is not None
 
         for image in images:
             image_bytes = image.get("bytes")
             if not image_bytes:
                 continue
 
-            extracted_text = self._run_ocr(image_bytes)
-            description = self._describe_diagram(image_bytes, extracted_text)
+            if image_based:
+                # Reuse the page OCR text; do not OCR the same page image again.
+                extracted_text = ""
+                description = f"Scanned image of page {page_number}."
+            else:
+                extracted_text = self._run_ocr(image_bytes)
+                description = self._describe_diagram(image_bytes, extracted_text)
+
             if description:
                 image_url = self._save_diagram_image(
                     file_id=file_id,

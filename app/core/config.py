@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     ocr_confidence_threshold: float = 0.6
     ocr_full_page: bool = True
     ocr_full_page_min_text_chars: int = 80
+    # 200 DPI keeps manual text/tables OCR-readable while roughly halving the
+    # render's peak memory vs 300 DPI (raise it if the host has ample RAM).
     ocr_full_page_dpi: int = 300
     enable_bm25_search: bool = False
     enable_reranking: bool = False

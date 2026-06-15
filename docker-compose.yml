@@ -80,6 +80,7 @@ services:
       - ENV=production
     volumes:
       - uploads_data:/app/static/uploads
+      - paddlex_models:/root/.paddlex
     depends_on:
       postgres:
         condition: service_healthy
@@ -117,6 +118,7 @@ volumes:
   ollama_data:
   redis_data:
   uploads_data:
+  paddlex_models:
 
 networks:
   chat-rag-network:
