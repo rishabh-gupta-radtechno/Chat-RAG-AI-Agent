@@ -130,10 +130,12 @@ class PDFProcessor:
 
         # Configure Docling pipeline options
         pipeline_options = PdfPipelineOptions()
-        # Keep Docling focused on text/table structure. OCR is handled below so
-        # Paddle/PaddleX initialization errors cannot abort document embedding.
-        pipeline_options.do_ocr = False
-        pipeline_options.do_table_structure = True  # Extract table structure
+        # By default keep OCR with our Paddle pipeline (below) so Docling stays
+        # light and Paddle errors can't abort embedding. Enable docling_do_ocr to
+        # let Docling OCR pages itself — required to recover tables from SCANNED
+        # PDFs via TableFormer, at the cost of extra memory/models.
+        pipeline_options.do_ocr = settings.docling_do_ocr
+        pipeline_options.do_table_structure = True  # TableFormer cell structure
 
         doc_converter = DocumentConverter(
             allowed_formats=[InputFormat.PDF],
@@ -158,6 +160,11 @@ class PDFProcessor:
         pages_text: dict[int, list[str]] = {i: [] for i in range(1, page_count + 1)}
         try:
             for item, _ in doc.iterate_items():
+                # Tables and pictures are captured via their own paths. Keep their
+                # text OUT of the flowing page text so a table's content lives only
+                # in its dedicated table chunk, never duplicated into a text chunk.
+                if type(item).__name__ in ("TableItem", "PictureItem"):
+                    continue
                 prov_list = getattr(item, "prov", None) or []
                 page_no = prov_list[0].page_no if prov_list else None
                 if page_no is None or page_no not in pages_text:
@@ -168,6 +175,7 @@ class PDFProcessor:
         except Exception as exc:
             logger.warning("Failed to iterate Docling items: %s", exc)
 
+        docling_tables = self._extract_docling_tables(doc)
         images_by_page = self._extract_page_images(filepath)
         native_pages = [" ".join(pages_text.get(i, [])) for i in range(1, page_count + 1)]
         rendered_pages = self._render_pages_for_ocr(filepath, native_pages)
@@ -179,13 +187,11 @@ class PDFProcessor:
             native_text, ocr_text = self._resolve_page_text(
                 raw_native_text, rendered_pages.get(page_number), page_images
             )
-            # See note in extract_page_documents: gate tables on a real text
-            # layer (sparse data tables included), not on meaningful prose.
-            tables = (
-                self._extract_tables(filepath, page_number)
-                if self._has_extractable_text_layer(raw_native_text)
-                else []
-            )
+            # Prefer Docling's structured tables (with captions + cell grid). Fall
+            # back to camelot/pdfplumber only for text-layer pages Docling missed.
+            tables = docling_tables.get(page_number, [])
+            if not tables and self._has_extractable_text_layer(raw_native_text):
+                tables = self._extract_tables(filepath, page_number)
             diagrams = self._extract_diagrams(
                 page_images,
                 tables,
@@ -204,6 +210,57 @@ class PDFProcessor:
 
         logger.info("Successfully extracted %d pages using Docling", len(pages))
         return pages
+
+    def _extract_docling_tables(self, doc: Any) -> Dict[int, List[Dict[str, Any]]]:
+        """Collect Docling's structured tables, keyed by page number.
+
+        Each table is normalized to ``{title, header, rows, markdown}`` so the
+        downstream chunker can store Markdown + semantic rows under a caption.
+        Defensive across Docling versions whose table API differs.
+        """
+        tables_by_page: Dict[int, List[Dict[str, Any]]] = {}
+        for table in getattr(doc, "tables", None) or []:
+            try:
+                prov = getattr(table, "prov", None) or []
+                page_no = prov[0].page_no if prov else None
+            except Exception:
+                page_no = None
+            if not page_no:
+                continue
+
+            title = ""
+            try:
+                title = (table.caption_text(doc) or "").strip()
+            except Exception:
+                pass
+
+            header: list = []
+            rows: list = []
+            try:
+                df = table.export_to_dataframe()
+                header = [str(c).strip() for c in df.columns.tolist()]
+                rows = [[str(c).strip() for c in row] for row in df.values.tolist()]
+            except Exception as exc:
+                logger.debug("Docling table dataframe export failed: %s", exc)
+
+            markdown = ""
+            for call in (lambda: table.export_to_markdown(doc), lambda: table.export_to_markdown()):
+                try:
+                    markdown = call() or ""
+                    break
+                except Exception:
+                    continue
+
+            if not (rows or markdown):
+                continue
+
+            tables_by_page.setdefault(page_no, []).append(
+                {"title": title or "Table", "header": header, "rows": rows, "markdown": markdown}
+            )
+
+        if tables_by_page:
+            logger.info("Docling extracted tables on %d page(s)", len(tables_by_page))
+        return tables_by_page
 
     def _extract_native_text_pages(self, filepath: str) -> list[str]:
         """Extract native text with pypdf, then fill weak pages with pdfplumber text."""

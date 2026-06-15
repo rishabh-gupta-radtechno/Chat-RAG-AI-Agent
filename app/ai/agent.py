@@ -73,11 +73,9 @@ class ReActAgent:
         # must not consume the text-document budget (e.g. neighbor-added pointers).
         text_documents = [doc for doc in documents if doc.get("content_type") != "diagram"]
 
-        for index, doc in enumerate(text_documents[: settings.rag_context_docs], start=1):
-            chunk_text = (doc.get("chunk_text") or "").strip()
-            if not chunk_text:
-                continue
-
+        index = 0
+        seen_tables: set = set()  # show each table once, in full, even if split across chunks
+        for doc in text_documents[: settings.rag_context_docs]:
             remaining_chars = char_limit - total_chars
             if remaining_chars <= 0:
                 break
@@ -86,12 +84,37 @@ class ReActAgent:
             page_number = doc.get("page_number", 0)
             document_page_number = doc.get("document_page_number")
             content_type = doc.get("content_type", "text")
-            chunk = chunk_text[:remaining_chars]
             page_label = f"page {page_number}"
             if document_page_number and document_page_number != page_number:
                 page_label = f"page {page_number}, document page {document_page_number}"
-            context_part = f"Source {index} ({filename}, {page_label}, {content_type}):\n{chunk}"
-            context_parts.append(context_part)
+
+            # For a table chunk, present the whole table as clean Markdown under
+            # its caption — so the model can read any cell — and only once.
+            if content_type == "table" and doc.get("table_markdown"):
+                table_title = (doc.get("table_title") or "Table").strip()
+                table_key = (filename, page_number, table_title)
+                if table_key in seen_tables:
+                    continue
+                seen_tables.add(table_key)
+                body = doc["table_markdown"].strip()
+                source_label = f'table "{table_title}"'
+            else:
+                body = (doc.get("chunk_text") or "").strip()
+                section_number = doc.get("section_number")
+                section_title = doc.get("section_title")
+                if section_number or section_title:
+                    source_label = "section " + " ".join(
+                        str(x) for x in [section_number, section_title] if x
+                    )
+                else:
+                    source_label = content_type
+
+            if not body:
+                continue
+
+            chunk = body[:remaining_chars]
+            index += 1
+            context_parts.append(f"Source {index} ({filename}, {page_label}, {source_label}):\n{chunk}")
             total_chars += len(chunk)
 
         context = "\n\n".join(context_parts)

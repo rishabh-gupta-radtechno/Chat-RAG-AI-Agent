@@ -54,11 +54,19 @@ class Settings(BaseSettings):
     embedding_dimension: int = 1024
     chunk_size: int = 1024
     chunk_overlap: int = 128
-    pdf_chunk_size: int = 450
-    pdf_chunk_overlap: int = 80
+    # Mid-size, section-scoped chunks: small enough for precise retrieval,
+    # large enough to keep a procedure/step coherent.
+    pdf_chunk_size: int = 250
+    pdf_chunk_overlap: int = 50
+    # Max table rows per chunk; large tables split into batches, header repeated.
+    table_rows_per_chunk: int = 15
 
     # PDF Processing
     use_docling: bool = True  # Use Docling for advanced PDF processing
+    # Let Docling OCR pages itself (needed to recover tables from SCANNED PDFs
+    # via TableFormer). Off by default — it adds models/memory; enable only with
+    # enough RAM (see the OCR out-of-memory notes).
+    docling_do_ocr: bool = True
     ocr_engine: str = "paddleocr"
     ocr_lang: str = "en"  # PaddleOCR language code; mapped to the Tesseract equivalent
     enable_diagram_captioning: bool = False

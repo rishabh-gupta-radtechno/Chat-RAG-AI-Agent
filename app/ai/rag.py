@@ -3,6 +3,7 @@ RAG (Retrieval-Augmented Generation) pipeline.
 """
 
 import math
+import re
 import uuid
 from typing import Optional
 
@@ -181,9 +182,24 @@ class RAGPipeline:
                 )
             )
 
+            # Section-scoped retrieval: when the query names a section (e.g.
+            # "section 3.6"), pull that whole section by exact metadata match so
+            # it is returned even if the bare reference has little to embed.
+            section_documents = []
+            section_ref = self._section_reference(query)
+            if section_ref:
+                section_documents = await self.vector_db.search_by_section(
+                    section_ref,
+                    limit=top_k * 2,
+                    user_id=str(retrieval_user_id) if retrieval_user_id else None,
+                )
+                for document in section_documents:
+                    document["section_match"] = True
+                logger.info("Section '%s' filter matched %d chunk(s)", section_ref, len(section_documents))
+
             # Combine and deduplicate
             documents_by_id = {}
-            for document in semantic_documents + bm25_documents + keyword_documents:
+            for document in semantic_documents + bm25_documents + keyword_documents + section_documents:
                 # Diagram chunks (incl. scanned-page image pointers) are surfaced
                 # via the dedicated diagram path, not as text context — keep them
                 # out of text retrieval so they never occupy a context slot.
@@ -420,7 +436,28 @@ class RAGPipeline:
             "toc": 0.3,
         }.get(document.get("page_type", "content"), 0.0)
 
-        return (semantic_score * 2.0) + lexical_score + content_bonus - page_type_penalty
+        # An exact section-number match is the strongest signal for a query that
+        # explicitly asks for a section, so float it to the top.
+        section_bonus = 1.0 if document.get("section_match") else 0.0
+
+        return (semantic_score * 2.0) + lexical_score + content_bonus + section_bonus - page_type_penalty
+
+    @staticmethod
+    def _section_reference(query: str) -> Optional[str]:
+        """Extract an explicit section number from a query.
+
+        e.g. "what is in section 3.6?" / "sec 3.6" / "clause 3.6" -> "3.6".
+        Requires a section keyword so plain numbers/measurements aren't treated
+        as section references.
+        """
+        if not query:
+            return None
+        match = re.search(
+            r"\b(?:section|sec|clause|para(?:graph)?|article|point)\s*\.?\s*(\d+(?:\.\d+){0,3})\b",
+            query,
+            flags=re.IGNORECASE,
+        )
+        return match.group(1) if match else None
 
     def _embed_locally(self, text: str) -> list[float]:
         """Generate embeddings using local sentence-transformers model."""

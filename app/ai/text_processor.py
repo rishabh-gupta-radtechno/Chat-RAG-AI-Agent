@@ -200,6 +200,40 @@ class TextProcessor:
 
         return "\n".join(text_lines).strip()
 
+    @staticmethod
+    def _table_title(table: dict, fallback: str = "Table") -> str:
+        """Caption/heading to prepend to every chunk of this table."""
+        return str(table.get("title") or table.get("caption") or fallback).strip() or fallback
+
+    @staticmethod
+    def table_to_markdown(header: list, rows: list) -> str:
+        """Render a table as GitHub-flavored Markdown (header row repeated by caller)."""
+        header = [str(h).strip() for h in (header or [])]
+        width = len(header) or max((len(r) for r in rows), default=0)
+        if not width:
+            return ""
+
+        def _fmt(cells: list) -> str:
+            cells = [str(c).strip().replace("|", "\\|").replace("\n", " ") for c in cells]
+            cells += [""] * (width - len(cells))
+            return "| " + " | ".join(cells[:width]) + " |"
+
+        lines = []
+        if header:
+            lines.append(_fmt(header))
+            lines.append("| " + " | ".join(["---"] * width) + " |")
+        lines.extend(_fmt(row) for row in rows)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _row_to_semantic(header: list, row: list) -> str:
+        """One row as key=value pairs, e.g. ``Part=BC, Pressure=5 kg/cm²``."""
+        cells = [str(c).strip() for c in row]
+        header = [str(h).strip() for h in (header or [])]
+        if header and len(cells) == len(header):
+            return ", ".join(f"{h}={v}" for h, v in zip(header, cells) if v)
+        return " | ".join(c for c in cells if c)
+
     # Page types that add no retrieval value — skipped entirely at ingest
     _SKIP_PAGE_TYPES = {"cover", "contact", "revision", "copyright", "catalog"}
 
@@ -221,6 +255,124 @@ class TextProcessor:
         if re.search(r"\bcatalog(?:ue)?\b|\bpart\s+(number|no)\.?\s+list\b", t) and words < 400:
             return "catalog"
         return "content"
+
+    # A numbered section heading, e.g. "3.1 Main Valve" or "1.2.0 CONSTRUCTION DETAILS".
+    _SECTION_HEADING_RE = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){0,3})\.?\s+([A-Za-z][^\n]{1,69})$")
+    _HEADING_CONNECTORS = {
+        "of", "and", "to", "the", "for", "in", "on", "or", "a", "an",
+        "with", "from", "by", "at", "is", "as", "off",
+    }
+
+    @classmethod
+    def _match_section_heading(cls, line: str) -> Optional[tuple]:
+        """Return (number, title) when a line looks like a numbered section heading.
+
+        Heading titles are Title-Case or ALL CAPS (e.g. "Main Valve", "OVERHAUL"),
+        which lets us reject prose and OCR'd table rows like "8. Floor height".
+        """
+        match = cls._SECTION_HEADING_RE.match(line.strip())
+        if not match:
+            return None
+        number = match.group(1)
+        title = re.sub(r"\s*\([^)]*\)\s*$", "", match.group(2)).strip().rstrip(":").strip()
+        words = [w for w in title.split() if any(c.isalpha() for c in w)]
+        if not (1 <= len(words) <= 9):
+            return None
+        non_conforming = [
+            w for w in words if not (w[:1].isupper() or w.lower() in cls._HEADING_CONNECTORS)
+        ]
+        if not (title.isupper() or not non_conforming):
+            return None
+        return number, title
+
+    @staticmethod
+    def _boilerplate_key(line: str) -> str:
+        """Digit-insensitive key so page-varying running heads ('Sheet - 6/7/8') group."""
+        return re.sub(r"\d+", "#", re.sub(r"\s+", " ", line).strip().lower())
+
+    @classmethod
+    def _detect_boilerplate_lines(cls, page_texts: list) -> set:
+        """Short lines repeating across most pages are running headers/footers."""
+        pages = [t for t in page_texts if t]
+        n = len(pages)
+        if n < 3:
+            return set()
+        from collections import Counter
+
+        counts: "Counter" = Counter()
+        for text in pages:
+            seen = set()
+            for raw in text.splitlines():
+                line = re.sub(r"\s+", " ", raw).strip()
+                if not line or len(line.split()) > 10:
+                    continue
+                key = cls._boilerplate_key(line)
+                if key and key not in seen:
+                    seen.add(key)
+                    counts[key] += 1
+        threshold = max(2, (n + 1) // 2)  # present on at least half the pages
+        return {key for key, count in counts.items() if count >= threshold}
+
+    @classmethod
+    def _strip_boilerplate(cls, text: str, boilerplate_keys: set) -> str:
+        """Drop running headers/footers and scanner watermarks before embedding."""
+        if not text:
+            return text
+        kept = []
+        for raw in text.splitlines():
+            line = re.sub(r"\s+", " ", raw).strip()
+            if not line:
+                continue
+            if re.search(r"scanned by camscanner", line, flags=re.IGNORECASE):
+                continue
+            if len(line.split()) <= 10 and cls._boilerplate_key(line) in boilerplate_keys:
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
+    def _split_into_sections(self, page_texts: list) -> list:
+        """Split cleaned per-page text into heading-bounded segments, threading the
+        current section across page breaks. Each segment keeps its start page."""
+        segments: list = []
+        current: Optional[dict] = None
+
+        def _flush() -> None:
+            if current and current["lines"]:
+                current["text"] = "\n".join(current["lines"])
+                segments.append(current)
+
+        for page in page_texts:
+            for raw in page["text"].splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                heading = self._match_section_heading(line)
+                if heading:
+                    _flush()
+                    number, title = heading
+                    current = {
+                        "section_number": number,
+                        "section_title": title,
+                        "page_number": page["page_number"],
+                        "content_type": page["content_type"],
+                        "page_type": page["page_type"],
+                        "document_page_number": page["document_page_number"],
+                        "lines": [line],
+                    }
+                else:
+                    if current is None:
+                        current = {
+                            "section_number": None,
+                            "section_title": None,
+                            "page_number": page["page_number"],
+                            "content_type": page["content_type"],
+                            "page_type": page["page_type"],
+                            "document_page_number": page["document_page_number"],
+                            "lines": [],
+                        }
+                    current["lines"].append(line)
+        _flush()
+        return segments
 
     def build_pdf_chunks(self, page_documents: list[dict], file_name: str) -> list[dict]:
         """Create metadata-rich chunks for a PDF with page-aware sections."""
@@ -250,57 +402,73 @@ class TextProcessor:
                 }
             )
 
+        # Remove repeated running headers/footers across the whole document first.
+        raw_page_texts = [
+            (page.get("native_text") or page.get("ocr_text") or "") for page in page_documents
+        ]
+        boilerplate = self._detect_boilerplate_lines(raw_page_texts)
+
+        # Cleaned, content-only per-page text — the source for section chunking.
+        page_texts: list = []
+        page_meta: dict = {}
         for page in page_documents:
             page_number = page.get("page_number", 0)
-            page_text = page.get("native_text") or page.get("ocr_text") or ""
-            page_type = self._detect_page_type(page_text, page_number)
+            is_native = bool(page.get("native_text"))
+            raw = page.get("native_text") or page.get("ocr_text") or ""
+            cleaned = self.clean_pdf_page_text(raw) if is_native else raw
+            cleaned = self._strip_boilerplate(cleaned, boilerplate)
+            page_type = self._detect_page_type(cleaned, page_number)
+            document_page_number = self.extract_document_page_number(page.get("native_text", ""))
+            page_meta[page_number] = {
+                "page_type": page_type,
+                "document_page_number": document_page_number,
+            }
+            if page_type in self._SKIP_PAGE_TYPES or not cleaned.strip():
+                continue
+            page_texts.append(
+                {
+                    "page_number": page_number,
+                    "text": cleaned,
+                    "content_type": "text" if is_native else "ocr",
+                    "page_type": page_type,
+                    "document_page_number": document_page_number,
+                }
+            )
 
+        # Chunk text by section (heading-bounded, spanning pages); the section
+        # title is stored inside the chunk text and in metadata.
+        for seg_index, seg in enumerate(self._split_into_sections(page_texts), start=1):
+            number, title = seg["section_number"], seg["section_title"]
+            label = f"Section {number} {title}".strip() if (number or title) else ""
+            for part_index, chunk_text in enumerate(self.chunk_text_by_words(seg["text"]), start=1):
+                body = f"{label}\n{chunk_text}" if label else chunk_text
+                _add_chunk(
+                    body,
+                    {
+                        "file_name": file_name,
+                        "page_number": seg["page_number"],
+                        "document_page_number": seg["document_page_number"],
+                        "content_type": seg["content_type"],
+                        "page_type": seg["page_type"],
+                        "section_number": number,
+                        "section_title": title,
+                        "chunk_id": f"{file_name}|sec{seg_index:03d}|{seg['content_type']}|{part_index:03d}",
+                    },
+                )
+
+        # Tables and diagrams stay anchored to their page.
+        for page in page_documents:
+            page_number = page.get("page_number", 0)
+            meta = page_meta.get(page_number, {"page_type": "content", "document_page_number": None})
+            page_type = meta["page_type"]
+            document_page_number = meta["document_page_number"]
             if page_type in self._SKIP_PAGE_TYPES:
                 continue
 
-            document_page_number = self.extract_document_page_number(page.get("native_text", ""))
-            section_counters = {
-                "text": 0,
-                "ocr": 0,
-                "table": 0,
-                "diagram": 0,
-            }
-
-            if page.get("native_text"):
-                native_text = self.clean_pdf_page_text(page["native_text"])
-                for chunk_text in self.chunk_text_by_words(native_text):
-                    section_counters["text"] += 1
-                    _add_chunk(
-                        chunk_text,
-                        {
-                            "file_name": file_name,
-                            "page_number": page_number,
-                            "document_page_number": document_page_number,
-                            "content_type": "text",
-                            "page_type": page_type,
-                            "chunk_id": f"{file_name}|page{page_number}|text|{section_counters['text']:03d}",
-                        },
-                    )
-
-            include_ocr = page.get("ocr_text") and not page.get("native_text")
-            if include_ocr:
-                for chunk_text in self.chunk_text_by_words(page["ocr_text"]):
-                    section_counters["ocr"] += 1
-                    _add_chunk(
-                        chunk_text,
-                        {
-                            "file_name": file_name,
-                            "page_number": page_number,
-                            "document_page_number": document_page_number,
-                            "content_type": "ocr",
-                            "page_type": page_type,
-                            "chunk_id": f"{file_name}|page{page_number}|ocr|{section_counters['ocr']:03d}",
-                        },
-                    )
-
             for table_index, table in enumerate(page.get("tables", []), start=1):
-                table_chunks = self.chunk_table_text(self.render_table_to_text(table), table)
-                for part_index, chunk_text in enumerate(table_chunks, start=1):
+                table_title = self._table_title(table, fallback=f"Table {table_index}")
+                table_markdown = self.table_to_markdown(table.get("header", []), table.get("rows", []))
+                for part_index, chunk_text in enumerate(self.chunk_table_text(table), start=1):
                     _add_chunk(
                         chunk_text,
                         {
@@ -309,15 +477,18 @@ class TextProcessor:
                             "document_page_number": document_page_number,
                             "content_type": "table",
                             "page_type": page_type,
+                            "table_title": table_title,
+                            "table_markdown": table_markdown,
                             "chunk_id": f"{file_name}|page{page_number}|table|{table_index:03d}.{part_index:02d}",
                         },
                     )
 
+            diagram_index = 0
             for diagram in page.get("diagrams", []):
-                section_counters["diagram"] += 1
                 description = self.fix_mojibake(diagram.get("description", "")).strip()
                 if not description:
                     continue
+                diagram_index += 1
                 _add_chunk(
                     description,
                     {
@@ -330,7 +501,7 @@ class TextProcessor:
                         "diagram_description": description,
                         "diagram_ocr_text": self.fix_mojibake(diagram.get("ocr_text", "")).strip(),
                         "image_url": diagram.get("image_url"),
-                        "chunk_id": f"{file_name}|page{page_number}|diagram|{section_counters['diagram']:03d}",
+                        "chunk_id": f"{file_name}|page{page_number}|diagram|{diagram_index:03d}",
                     },
                 )
 
@@ -343,30 +514,33 @@ class TextProcessor:
             return None
         return int(matches[-1])
 
-    def chunk_table_text(self, table_text: str, table: dict) -> list[str]:
-        """Create chunks for table text that preserve headers and structure."""
-        header = table.get("header", [])
-        rows = table.get("rows", [])
+    def chunk_table_text(self, table: dict) -> list[str]:
+        """Chunk a structured table for retrieval.
+
+        Each chunk carries: the table title (caption/heading), a Markdown block
+        with the header repeated, and a semantic ``key=value`` line per row so
+        BGE-M3 embeds each row as a self-contained fact. Large tables are split
+        into row-batches (the header is repeated in every batch), so a long table
+        never lands in a single chunk.
+        """
+        header = [str(h).strip() for h in table.get("header", [])]
+        rows = table.get("rows", []) or []
+        title = self._table_title(table)
+
         if not rows:
-            return self.chunk_text_by_words(table_text)
+            md = self.table_to_markdown(header, [])
+            return [f"Table: {title}\n\n{md}".strip()] if md else []
 
-        # If table is small, keep as one chunk
-        if len(rows) <= 3:
-            return [table_text]
-
-        # Chunk by rows, keeping header in each
+        rows_per_chunk = max(1, settings.table_rows_per_chunk)
         chunks: list[str] = []
-        header_text = f"Table: {table.get('title', 'Table')}\nColumns: {', '.join(header)}"
-        rows_per_chunk = max(1, settings.pdf_chunk_size // 100)  # Adjust for table density
         for start in range(0, len(rows), rows_per_chunk):
             group = rows[start : start + rows_per_chunk]
-            row_texts = []
-            for row_index, row in enumerate(group, start=start + 1):
-                if len(row) == len(header):
-                    row_dict = {header[i]: str(row[i]).strip() for i in range(len(header))}
-                    row_text = ", ".join([f"{k}: {v}" for k, v in row_dict.items()])
-                else:
-                    row_text = " | ".join([str(cell).strip() for cell in row])
-                row_texts.append(f"Row {row_index}: {row_text}")
-            chunks.append(f"{header_text}\n" + "\n".join(row_texts))
+            markdown = self.table_to_markdown(header, group)  # header repeated per chunk
+            semantic = "\n".join(
+                line for line in (self._row_to_semantic(header, row) for row in group) if line
+            )
+            parts = [f"Table: {title}", markdown]
+            if semantic:
+                parts.append("Rows:\n" + semantic)
+            chunks.append("\n\n".join(p for p in parts if p).strip())
         return chunks

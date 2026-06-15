@@ -222,6 +222,48 @@ class VectorDBClient:
             logger.error(f"Error keyword searching vectors: {e}")
             raise
 
+    async def search_by_section(
+        self,
+        section_number: str,
+        limit: int = 20,
+        user_id: Optional[str] = None,
+    ) -> list[dict]:
+        """Return all chunks whose section_number matches exactly (e.g. '3.6').
+
+        Lets a query that names a section retrieve that whole section by metadata,
+        independent of embedding/keyword similarity.
+        """
+        try:
+            must = [
+                FieldCondition(key="section_number", match=MatchValue(value=str(section_number)))
+            ]
+            if user_id:
+                must.append(FieldCondition(key="user_id", match=MatchValue(value=str(user_id))))
+            section_filter = Filter(must=must)
+
+            results: list[dict] = []
+            offset = None
+            while True:
+                points, offset = await self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=100,
+                    offset=offset,
+                    scroll_filter=section_filter,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    payload = point.payload or {}
+                    results.append({"id": point.id, "relevance_score": 0.0, **payload})
+                if offset is None or len(results) >= limit:
+                    break
+
+            logger.info(f"Found {len(results)} chunks in section {section_number}")
+            return results[:limit]
+        except Exception as e:
+            logger.error(f"Error searching section {section_number}: {e}")
+            return []
+
     async def _get_all_documents(self, user_id: Optional[str] = None) -> list[dict]:
         """Return all point payloads for lightweight lexical retrieval."""
         documents = []

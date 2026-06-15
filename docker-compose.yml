@@ -76,6 +76,9 @@ services:
       - OLLAMA_NUM_PREDICT=-1
       - RAG_CONTEXT_DOCS=6
       - RAG_CONTEXT_MAX_CHARS=8000
+      # Let Docling OCR pages so TableFormer can recover tables from scanned PDFs
+      # (memory-heavy — needs enough RAM; see OCR out-of-memory notes).
+      - DOCLING_DO_OCR=true
       - DEBUG=False
       - ENV=production
     volumes:
