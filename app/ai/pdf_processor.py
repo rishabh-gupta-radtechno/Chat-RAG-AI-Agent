@@ -97,12 +97,15 @@ class PDFProcessor:
             )
             # Image-based page (text came from OCR) -> reuse that OCR text for the
             # page image instead of OCR-ing it a second time in the diagram path.
+            # If the page already yielded text (native or OCR), its embedded
+            # full-page scan is not a separate figure — keep it as an image
+            # pointer instead of re-OCR'ing the whole page into a giant chunk.
             diagrams = self._extract_diagrams(
                 page_images,
                 tables,
                 file_id=file_id,
                 page_number=page_number,
-                page_ocr_text=ocr_text if not native_text else None,
+                page_ocr_text=(native_text or ocr_text) or None,
             )
 
             pages.append(
@@ -190,12 +193,14 @@ class PDFProcessor:
 
         docling_tables = self._extract_docling_tables(doc)
         images_by_page = self._extract_page_images(filepath)
-        native_pages = [" ".join(pages_text.get(i, [])) for i in range(1, page_count + 1)]
+        # Join items with newlines (not spaces) so each heading/paragraph stays on
+        # its own line — section detection in build_pdf_chunks splits on newlines.
+        native_pages = ["\n".join(pages_text.get(i, [])) for i in range(1, page_count + 1)]
         rendered_pages = self._render_pages_for_ocr(filepath, native_pages)
 
         pages: list[Dict[str, Any]] = []
         for page_number in range(1, page_count + 1):
-            raw_native_text = " ".join(pages_text.get(page_number, []))
+            raw_native_text = "\n".join(pages_text.get(page_number, []))
             page_images = images_by_page.get(page_number, [])
             native_text, ocr_text = self._resolve_page_text(
                 raw_native_text, rendered_pages.get(page_number), page_images
@@ -205,12 +210,15 @@ class PDFProcessor:
             tables = docling_tables.get(page_number, [])
             if not tables and self._has_extractable_text_layer(raw_native_text):
                 tables = self._extract_tables(filepath, page_number)
+            # If the page already yielded text (native or OCR), its embedded
+            # full-page scan is not a separate figure — keep it as an image
+            # pointer instead of re-OCR'ing the whole page into a giant chunk.
             diagrams = self._extract_diagrams(
                 page_images,
                 tables,
                 file_id=file_id,
                 page_number=page_number,
-                page_ocr_text=ocr_text if not native_text else None,
+                page_ocr_text=(native_text or ocr_text) or None,
             )
 
             pages.append({
