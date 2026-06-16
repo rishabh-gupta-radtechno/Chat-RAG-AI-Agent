@@ -136,6 +136,19 @@ class PDFProcessor:
         # PDFs via TableFormer, at the cost of extra memory/models.
         pipeline_options.do_ocr = settings.docling_do_ocr
         pipeline_options.do_table_structure = True  # TableFormer cell structure
+        if settings.docling_do_ocr:
+            # A fully-scanned page is one big image; without full-page OCR Docling
+            # only reads detected sub-regions and TableFormer gets no cell text,
+            # so it finds no table. Force OCR over the whole page.
+            try:
+                pipeline_options.ocr_options.force_full_page_ocr = True
+            except Exception as exc:
+                logger.debug("Could not set force_full_page_ocr: %s", exc)
+        # Cross-link table cells with the page text so TableFormer reconstructs values.
+        try:
+            pipeline_options.table_structure_options.do_cell_matching = True
+        except Exception:
+            pass
 
         doc_converter = DocumentConverter(
             allowed_formats=[InputFormat.PDF],
@@ -236,12 +249,19 @@ class PDFProcessor:
 
             header: list = []
             rows: list = []
-            try:
-                df = table.export_to_dataframe()
+            df = None
+            for export in (lambda: table.export_to_dataframe(doc), lambda: table.export_to_dataframe()):
+                try:
+                    df = export()
+                    break
+                except TypeError:
+                    continue
+                except Exception as exc:
+                    logger.debug("Docling table dataframe export failed: %s", exc)
+                    break
+            if df is not None:
                 header = [str(c).strip() for c in df.columns.tolist()]
                 rows = [[str(c).strip() for c in row] for row in df.values.tolist()]
-            except Exception as exc:
-                logger.debug("Docling table dataframe export failed: %s", exc)
 
             markdown = ""
             for call in (lambda: table.export_to_markdown(doc), lambda: table.export_to_markdown()):

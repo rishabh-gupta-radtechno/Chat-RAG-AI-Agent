@@ -258,6 +258,10 @@ class TextProcessor:
 
     # A numbered section heading, e.g. "3.1 Main Valve" or "1.2.0 CONSTRUCTION DETAILS".
     _SECTION_HEADING_RE = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){0,3})\.?\s+([A-Za-z][^\n]{1,69})$")
+    # A line that is only a *dotted* section number (OCR wraps the title onto the
+    # next line). Requiring a dot avoids mistaking OCR'd integer table-row numbers
+    # ("5", "10") followed by an all-caps cell for a heading.
+    _NUMBER_ONLY_RE = re.compile(r"^\d{1,2}(?:\.\d{1,2}){1,3}\.?$")
     _HEADING_CONNECTORS = {
         "of", "and", "to", "the", "for", "in", "on", "or", "a", "an",
         "with", "from", "by", "at", "is", "as", "off",
@@ -342,11 +346,19 @@ class TextProcessor:
                 segments.append(current)
 
         for page in page_texts:
-            for raw in page["text"].splitlines():
-                line = raw.strip()
-                if not line:
-                    continue
+            lines = [ln.strip() for ln in page["text"].splitlines() if ln.strip()]
+            i = 0
+            while i < len(lines):
+                line = lines[i]
                 heading = self._match_section_heading(line)
+                # OCR often wraps a heading onto two lines ("1.4" then the title
+                # on the next line); join a number-only line with the following
+                # line and re-test so those headings are still detected.
+                if not heading and i + 1 < len(lines) and self._NUMBER_ONLY_RE.match(line):
+                    combined = self._match_section_heading(f"{line.rstrip('.')} {lines[i + 1]}")
+                    if combined:
+                        heading = combined
+                        i += 1  # consume the title line too
                 if heading:
                     _flush()
                     number, title = heading
@@ -357,7 +369,7 @@ class TextProcessor:
                         "content_type": page["content_type"],
                         "page_type": page["page_type"],
                         "document_page_number": page["document_page_number"],
-                        "lines": [line],
+                        "lines": [f"{number} {title}"],
                     }
                 else:
                     if current is None:
@@ -371,6 +383,7 @@ class TextProcessor:
                             "lines": [],
                         }
                     current["lines"].append(line)
+                i += 1
         _flush()
         return segments
 
