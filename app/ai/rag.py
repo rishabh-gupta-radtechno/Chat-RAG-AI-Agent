@@ -74,6 +74,8 @@ class RAGPipeline:
             if filepath.endswith(".pdf"):
                 page_documents = self.pdf_processor.extract_page_documents(filepath, file_id=str(file_id))
                 chunks = self.text_processor.build_pdf_chunks(page_documents, filename)
+                # Stages 1 & 2: exact + diagram/fuzzy dedup before embedding.
+                chunks = self.text_processor.deduplicate_chunks(chunks)
                 logger.info(
                     "Extracted PDF page data for %s pages and created %s chunks",
                     len(page_documents),
@@ -135,6 +137,9 @@ class RAGPipeline:
                 except Exception as e:
                     logger.warning(f"Error embedding chunk {i}: {e}")
                     continue
+
+            # Stage 3: drop near-identical chunks by embedding cosine similarity.
+            vectors = self._dedup_by_embedding(vectors)
 
             if vectors:
                 await self.vector_db.upsert_vectors(vectors)
@@ -441,6 +446,75 @@ class RAGPipeline:
         section_bonus = 1.0 if document.get("section_match") else 0.0
 
         return (semantic_score * 2.0) + lexical_score + content_bonus + section_bonus - page_type_penalty
+
+    @staticmethod
+    def _dedup_by_embedding(vectors: list[dict]) -> list[dict]:
+        """Stage 3 dedup: drop chunks whose embeddings are near-identical.
+
+        For any pair with cosine similarity >= threshold, the lower-priority
+        content_type is dropped (text/table kept over ocr/diagram), so the same
+        information embedded two ways is stored once.
+        """
+        if not settings.dedup_enabled or len(vectors) < 2:
+            return vectors
+        try:
+            import numpy as np
+        except ImportError:
+            return vectors
+
+        priority = TextProcessor._DEDUP_PRIORITY
+        threshold = settings.dedup_embedding_threshold
+        normed = []
+        for v in vectors:
+            arr = np.asarray(v["embedding"], dtype=float)
+            norm = np.linalg.norm(arr)
+            normed.append(arr / norm if norm else arr)
+
+        keep = [True] * len(vectors)
+        for i in range(len(vectors)):
+            if not keep[i]:
+                continue
+            for j in range(i + 1, len(vectors)):
+                if not keep[j]:
+                    continue
+                if float(np.dot(normed[i], normed[j])) < threshold:
+                    continue
+                pi = priority.get(vectors[i]["metadata"].get("content_type"), 0)
+                pj = priority.get(vectors[j]["metadata"].get("content_type"), 0)
+                if pj <= pi:
+                    keep[j] = False
+                    RAGPipeline._link_dropped_image(vectors[i], vectors[j])
+                else:
+                    keep[i] = False
+                    RAGPipeline._link_dropped_image(vectors[j], vectors[i])
+                    break
+
+        result = [v for v, k in zip(vectors, keep) if k]
+        if len(result) != len(vectors):
+            logger.info("Embedding dedup: %d -> %d vectors", len(vectors), len(result))
+        return result
+
+    @staticmethod
+    def _link_dropped_image(keeper: dict, dropped: dict) -> None:
+        """When an embedding-duplicate diagram vector is dropped in favor of a
+        text/table vector, keep its image by linking it to the survivor."""
+        dmeta = dropped.get("metadata", {})
+        kmeta = keeper.get("metadata", {})
+        if dmeta.get("content_type") != "diagram" or not dmeta.get("image_url"):
+            return
+        if kmeta.get("content_type") not in ("text", "table", "ocr"):
+            return
+        related = kmeta.setdefault("related_images", [])
+        if any(r.get("chunk_id") == dmeta.get("chunk_id") for r in related):
+            return
+        related.append(
+            {
+                "chunk_id": dmeta.get("chunk_id"),
+                "image_url": dmeta.get("image_url"),
+                "image_index": dmeta.get("image_index"),
+                "page_number": dmeta.get("page_number"),
+            }
+        )
 
     @staticmethod
     def _section_reference(query: str) -> Optional[str]:

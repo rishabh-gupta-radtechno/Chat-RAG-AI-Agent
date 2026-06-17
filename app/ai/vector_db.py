@@ -296,35 +296,58 @@ class VectorDBClient:
         limit: int = 10,
         user_id: Optional[str] = None,
     ) -> list[dict]:
-        """Find diagram chunks from the same files/pages as retrieved text chunks."""
+        """Find images to show for retrieved chunks.
+
+        Two sources: standalone diagram chunks on the same file/page, and images
+        linked to a retrieved text chunk via ``related_images`` (the dedup pattern
+        where a duplicate diagram is not stored as its own vector).
+        """
+        diagrams: list = []
+        seen: set = set()
+
+        # 1. Images linked directly to the retrieved chunks (related_images).
+        for source in sources:
+            for related in source.get("related_images", []) or []:
+                image_url = related.get("image_url")
+                if not image_url or image_url in seen:
+                    continue
+                seen.add(image_url)
+                diagrams.append(
+                    {
+                        "file_id": source.get("file_id"),
+                        "filename": source.get("filename"),
+                        "page_number": related.get("page_number") or source.get("page_number"),
+                        "document_page_number": source.get("document_page_number"),
+                        "image_index": related.get("image_index"),
+                        "image_url": image_url,
+                        "diagram_description": f"Image on page {related.get('page_number') or source.get('page_number')}",
+                        "chunk_id": related.get("chunk_id"),
+                        "relevance_score": source.get("relevance_score", 0.0),
+                    }
+                )
+
+        # 2. Standalone diagram chunks on the same file/page as a retrieved chunk.
         source_pages = {
             (str(source.get("file_id")), source.get("page_number"))
             for source in sources
             if source.get("file_id") and source.get("page_number")
         }
-        if not source_pages:
-            return []
+        if source_pages:
+            for document in await self._get_all_documents(user_id=user_id):
+                if document.get("content_type") != "diagram":
+                    continue
+                key = (str(document.get("file_id")), document.get("page_number"))
+                if key not in source_pages:
+                    continue
+                image_url = document.get("image_url")
+                if image_url in seen:
+                    continue
+                seen.add(image_url)
+                diagrams.append(document)
+                if len(diagrams) >= limit:
+                    break
 
-        diagrams = []
-        seen = set()
-        for document in await self._get_all_documents(user_id=user_id):
-            if document.get("content_type") != "diagram":
-                continue
-
-            key = (str(document.get("file_id")), document.get("page_number"))
-            if key not in source_pages:
-                continue
-
-            diagram_id = document.get("id")
-            if diagram_id in seen:
-                continue
-            seen.add(diagram_id)
-            diagrams.append(document)
-
-            if len(diagrams) >= limit:
-                break
-
-        return diagrams
+        return diagrams[:limit]
 
     @staticmethod
     def _user_filter(user_id: Optional[str]) -> Optional[Filter]:

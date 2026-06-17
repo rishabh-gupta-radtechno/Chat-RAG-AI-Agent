@@ -6,8 +6,10 @@ import re
 from typing import Dict, List, Optional
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
 
 settings = get_settings()
+logger = get_logger(__name__)
 
 
 class TextProcessor:
@@ -386,6 +388,129 @@ class TextProcessor:
                 i += 1
         _flush()
         return segments
+
+    # Higher = preferred to keep when two chunks are duplicates.
+    _DEDUP_PRIORITY = {"text": 4, "table": 4, "ocr": 3, "diagram": 1}
+
+    @staticmethod
+    def _dedup_norm(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "")).strip().lower()
+
+    @staticmethod
+    def _dedup_tokens(text: str) -> set:
+        """Alphanumeric word tokens (punctuation stripped) for overlap metrics."""
+        return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+    @staticmethod
+    def _link_image_to_anchor(diagram: dict, anchors: list, anchor_tokens: list, diagram_tokens: set) -> None:
+        """Link a duplicate diagram's image to the nearest text/table chunk.
+
+        Picks the anchor whose tokens overlap the diagram most (preferring one on
+        the same page) and appends the diagram's image to its ``related_images`` so
+        the image is shown when that chunk is retrieved — without storing a second
+        searchable vector for the duplicated OCR text.
+        """
+        if not anchors:
+            return
+        dmeta = diagram.get("metadata", {})
+        if not dmeta.get("image_url"):
+            return
+        dpage = dmeta.get("page_number")
+        best_index, best_score = -1, -1.0
+        for index, (anchor, atokens) in enumerate(zip(anchors, anchor_tokens)):
+            if not atokens:
+                continue
+            score = len(atokens & diagram_tokens) / len(atokens)
+            if anchor.get("metadata", {}).get("page_number") == dpage:
+                score += 1.0  # prefer a chunk on the same page
+            if score > best_score:
+                best_score, best_index = score, index
+        if best_index < 0:
+            return
+        anchor_meta = anchors[best_index].setdefault("metadata", {})
+        anchor_meta.setdefault("related_images", []).append(
+            {
+                "chunk_id": dmeta.get("chunk_id"),
+                "image_url": dmeta.get("image_url"),
+                "image_index": dmeta.get("image_index"),
+                "page_number": dpage,
+            }
+        )
+
+    def deduplicate_chunks(self, chunks: list[dict]) -> list[dict]:
+        """Remove duplicate chunks before embedding (Stages 1 and 2 of dedup).
+
+        Stage 1 — exact: drop chunks with identical normalized text, keeping the
+        highest-priority content_type.
+        Stage 2a — diagram suppression: drop a diagram chunk whose OCR text is
+        already covered by the combined text/table chunks (containment, because a
+        page-image diagram is a superset of the individual text chunks).
+        Stage 2b — fuzzy: drop near-duplicate chunks (token Jaccard over the
+        threshold), keeping the higher-priority content_type.
+        """
+        if not settings.dedup_enabled or not chunks:
+            return chunks
+
+        priority = self._DEDUP_PRIORITY
+        before = len(chunks)
+
+        def ct(chunk: dict) -> str:
+            return chunk.get("metadata", {}).get("content_type", "text")
+
+        # Stage 1: exact normalized-text dedup.
+        seen: dict = {}
+        ordered: list = []
+        for chunk in chunks:
+            key = self._dedup_norm(chunk.get("text"))
+            if not key:
+                continue
+            current = seen.get(key)
+            if current is None:
+                seen[key] = chunk
+                ordered.append(key)
+            elif priority.get(ct(chunk), 0) > priority.get(ct(current), 0):
+                seen[key] = chunk
+        stage1 = [seen[k] for k in ordered]
+
+        # Stage 2a: a diagram whose OCR text is already covered by text/table
+        # chunks is NOT embedded as its own searchable vector. Its image is linked
+        # to the nearest text/table chunk via related_images, so retrieval can
+        # still show it ("text vector + linked image metadata" pattern).
+        anchors = [c for c in stage1 if ct(c) in ("text", "table", "ocr")]
+        anchor_tokens = [self._dedup_tokens(c["text"]) for c in anchors]
+        text_union: set = set().union(*anchor_tokens) if anchor_tokens else set()
+        stage2a: list = []
+        for chunk in stage1:
+            if ct(chunk) == "diagram" and text_union:
+                tokens = self._dedup_tokens(chunk["text"])
+                if tokens and len(tokens & text_union) / len(tokens) >= settings.dedup_diagram_suppression_threshold:
+                    self._link_image_to_anchor(chunk, anchors, anchor_tokens, tokens)
+                    continue  # image kept via the anchor's related_images
+            stage2a.append(chunk)
+
+        # Stage 2b: fuzzy near-duplicate (token Jaccard), keep higher priority.
+        final: list = []
+        final_tokens: list = []
+        for chunk in stage2a:
+            tokens = self._dedup_tokens(chunk["text"])
+            dup_index = -1
+            for index, existing in enumerate(final_tokens):
+                if not tokens or not existing:
+                    continue
+                jaccard = len(tokens & existing) / len(tokens | existing)
+                if jaccard >= settings.dedup_fuzzy_threshold:
+                    dup_index = index
+                    break
+            if dup_index == -1:
+                final.append(chunk)
+                final_tokens.append(tokens)
+            elif priority.get(ct(chunk), 0) > priority.get(ct(final[dup_index]), 0):
+                final[dup_index] = chunk
+                final_tokens[dup_index] = tokens
+
+        if len(final) != before:
+            logger.info("Deduplicated chunks: %d -> %d (text/diagram dedup)", before, len(final))
+        return final
 
     def build_pdf_chunks(self, page_documents: list[dict], file_name: str) -> list[dict]:
         """Create metadata-rich chunks for a PDF with page-aware sections."""

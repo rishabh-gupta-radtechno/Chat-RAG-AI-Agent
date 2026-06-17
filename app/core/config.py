@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # Max table rows per chunk; large tables split into batches, header repeated.
     table_rows_per_chunk: int = 15
 
+    # Chunk deduplication (run at ingest, before/after embedding)
+    dedup_enabled: bool = True
+    dedup_fuzzy_threshold: float = 0.90        # token-Jaccard near-duplicate
+    dedup_diagram_suppression_threshold: float = 0.85  # diagram text covered by text/table
+    dedup_embedding_threshold: float = 0.95    # cosine similarity of embeddings
+
     # PDF Processing
     use_docling: bool = True  # Use Docling for advanced PDF processing
     # Let Docling OCR pages itself (needed to recover tables from SCANNED PDFs
