@@ -152,6 +152,20 @@ class PDFProcessor:
             pipeline_options.table_structure_options.do_cell_matching = True
         except Exception:
             pass
+        # Render pages at higher resolution so TableFormer sees clean cell geometry
+        # (reduces row/cell off-by-one misalignment on scanned tables).
+        try:
+            pipeline_options.images_scale = settings.docling_images_scale
+        except Exception as exc:
+            logger.debug("Could not set docling images_scale: %s", exc)
+        # Prefer the accurate (heavier) TableFormer model for better cell matching.
+        if settings.docling_table_accurate:
+            try:
+                from docling.datamodel.pipeline_options import TableFormerMode
+
+                pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+            except Exception as exc:
+                logger.debug("Could not set TableFormer ACCURATE mode: %s", exc)
 
         doc_converter = DocumentConverter(
             allowed_formats=[InputFormat.PDF],

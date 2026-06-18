@@ -394,17 +394,41 @@ class TextProcessor:
         return "\n".join(kept)
 
     def _split_into_sections(self, page_texts: list) -> list:
-        """Split cleaned per-page text into heading-bounded segments, threading the
-        current section across page breaks. Each segment keeps its start page."""
+        """Split cleaned per-page text into heading-bounded, single-page segments.
+
+        The current section carries across page breaks (so its number/title are
+        kept), but a new page always starts a NEW segment tagged with that page,
+        so a chunk never mixes content from two pages. The heading text itself is
+        not duplicated into the body — build_pdf_chunks prepends the section label.
+        """
         segments: list = []
+        cur_num: Optional[str] = None
+        cur_title: Optional[str] = None
         current: Optional[dict] = None
 
+        def _new_segment(page: dict) -> dict:
+            return {
+                "section_number": cur_num,
+                "section_title": cur_title,
+                "page_number": page["page_number"],
+                "content_type": page["content_type"],
+                "page_type": page["page_type"],
+                "document_page_number": page["document_page_number"],
+                "lines": [],
+            }
+
         def _flush() -> None:
+            nonlocal current
             if current and current["lines"]:
                 current["text"] = "\n".join(current["lines"])
                 segments.append(current)
+            current = None
 
         for page in page_texts:
+            # A section continuing onto a new page becomes a fresh, page-tagged
+            # segment — chunks stay within one page for accurate citations.
+            _flush()
+            current = _new_segment(page)
             lines = [ln.strip() for ln in page["text"].splitlines() if ln.strip()]
             i = 0
             while i < len(lines):
@@ -420,27 +444,9 @@ class TextProcessor:
                         i += 1  # consume the title line too
                 if heading:
                     _flush()
-                    number, title = heading
-                    current = {
-                        "section_number": number,
-                        "section_title": title,
-                        "page_number": page["page_number"],
-                        "content_type": page["content_type"],
-                        "page_type": page["page_type"],
-                        "document_page_number": page["document_page_number"],
-                        "lines": [f"{number} {title}"],
-                    }
+                    cur_num, cur_title = heading
+                    current = _new_segment(page)  # heading supplied by the chunk prefix
                 else:
-                    if current is None:
-                        current = {
-                            "section_number": None,
-                            "section_title": None,
-                            "page_number": page["page_number"],
-                            "content_type": page["content_type"],
-                            "page_type": page["page_type"],
-                            "document_page_number": page["document_page_number"],
-                            "lines": [],
-                        }
                     current["lines"].append(line)
                 i += 1
         _flush()
