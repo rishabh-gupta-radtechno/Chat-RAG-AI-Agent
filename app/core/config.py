@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     # Mid-size, section-scoped chunks: small enough for precise retrieval,
     # large enough to keep a procedure/step coherent.
     pdf_chunk_size: int = 250
-    pdf_chunk_overlap: int = 50
+    pdf_chunk_overlap: int = 20
     # Max table rows per chunk; large tables split into batches, header repeated.
     table_rows_per_chunk: int = 15
     # Reject an "extracted table" whose text is >= this % similar to the page's
