@@ -252,6 +252,15 @@ class PDFProcessor:
         Each table is normalized to ``{title, header, rows, markdown}`` so the
         downstream chunker can store Markdown + semantic rows under a caption.
         Defensive across Docling versions whose table API differs.
+
+        KNOWN LIMITATION (accepted): on low-quality scans whose column labels are
+        vertically offset (e.g. the BLC wagon dimensions table, where 'A'Car and
+        'B'Car sit at different heights), TableFormer maps a header label's box
+        into the first data row and shifts every row's values by one. Raising
+        docling_images_scale and enabling docling_table_accurate were verified NOT
+        to fix this (it's a box-to-cell geometry issue, not resolution/model). The
+        values are still present, only mis-rowed. Reliable fix would be vision-LLM
+        extraction on the table crop — deferred for now.
         """
         tables_by_page: Dict[int, List[Dict[str, Any]]] = {}
         for table in getattr(doc, "tables", None) or []:

@@ -76,10 +76,12 @@ class Settings(BaseSettings):
     # via TableFormer). Off by default — it adds models/memory; enable only with
     # enough RAM (see the OCR out-of-memory notes).
     docling_do_ocr: bool = True
-    # Docling page-render scale for TableFormer (1.0=72dpi). Higher gives cleaner
-    # cell geometry -> fewer row/cell misalignments on scanned tables, at more memory.
+    # Docling page-render scale for TableFormer (1.0=72dpi). Raising it (e.g. 2.0)
+    # can sharpen cell geometry on cleaner scans but costs memory; it does NOT fix
+    # scans whose column labels are vertically offset (verified — no change there).
     docling_images_scale: float = 2.0
-    # Use the heavier, more accurate TableFormer model (better cell-to-row matching).
+    # Heavier ACCURATE TableFormer model — better on complex tables, more memory.
+    # Left off by default on this memory-constrained host; enable if RAM allows.
     docling_table_accurate: bool = True
     ocr_engine: str = "paddleocr"
     ocr_lang: str = "en"  # PaddleOCR language code; mapped to the Tesseract equivalent
