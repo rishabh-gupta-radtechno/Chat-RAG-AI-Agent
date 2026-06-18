@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     pdf_chunk_overlap: int = 50
     # Max table rows per chunk; large tables split into batches, header repeated.
     table_rows_per_chunk: int = 15
+    # Reject an "extracted table" whose text is >= this % similar to the page's
+    # prose — it's a false-positive table (paragraphs reformatted into cells).
+    table_vs_text_similarity_threshold: int = 85
 
     # Chunk deduplication (run at ingest, before/after embedding)
     dedup_enabled: bool = True

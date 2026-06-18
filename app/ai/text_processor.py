@@ -203,6 +203,63 @@ class TextProcessor:
         return "\n".join(text_lines).strip()
 
     @staticmethod
+    def _token_set_ratio(a: str, b: str) -> float:
+        """Fuzzy token-set similarity (0-100). Uses RapidFuzz when available."""
+        try:
+            from rapidfuzz.fuzz import token_set_ratio
+            return float(token_set_ratio(a or "", b or ""))
+        except Exception:
+            ta = set(re.findall(r"[a-z0-9]+", (a or "").lower()))
+            tb = set(re.findall(r"[a-z0-9]+", (b or "").lower()))
+            if not ta or not tb:
+                return 0.0
+            # containment of the smaller token set ~ token_set_ratio behaviour
+            return 100.0 * len(ta & tb) / min(len(ta), len(tb))
+
+    @staticmethod
+    def validate_table(table: dict, page_text: str = "") -> bool:
+        """Return True only for a genuine structured table.
+
+        Rejects TableFormer/camelot false positives where ordinary paragraph text
+        was forced into a grid (e.g. "T | he changeover Valve ...").
+        """
+        header = [str(h).strip() for h in (table.get("header") or [])]
+        rows = [[str(c).strip() for c in r] for r in (table.get("rows") or [])]
+
+        # Rule 1 — structure: a table needs >= 2 columns and >= 2 rows.
+        ncols = max([len(header)] + [len(r) for r in rows] or [0])
+        nrows = (1 if any(header) else 0) + len(rows)
+        if ncols < 2 or nrows < 2:
+            return False
+
+        cells = [c for c in header if c] + [c for row in rows for c in row if c]
+        if not cells:
+            return False
+
+        # Rule 2 — split-word artifacts: standalone single letters ("T", "he"
+        # from a split "The") betray paragraph text chopped into cells.
+        single_char = sum(1 for c in cells if len(c) == 1 and c.isalpha())
+        if single_char >= 2:
+            return False
+
+        # Rule 3 — paragraph dominance: real table cells are short values, not
+        # prose. Reject when cells are mostly long sentences.
+        word_counts = [len(c.split()) for c in cells]
+        avg_words = sum(word_counts) / len(word_counts)
+        long_cells = sum(1 for w in word_counts if w >= 10)
+        if avg_words > 10 or long_cells > 0.5 * len(cells):
+            return False
+
+        # Rule 4 — page-text similarity: a table that merely reformats the page
+        # prose (so its text ~= the page text) is a false positive.
+        if page_text:
+            table_text = " ".join(cells)
+            if TextProcessor._token_set_ratio(page_text, table_text) >= settings.table_vs_text_similarity_threshold:
+                return False
+
+        return True
+
+    @staticmethod
     def _table_title(table: dict, fallback: str = "Table") -> str:
         """Caption/heading to prepend to every chunk of this table."""
         return str(table.get("title") or table.get("caption") or fallback).strip() or fallback
@@ -603,7 +660,17 @@ class TextProcessor:
             if page_type in self._SKIP_PAGE_TYPES:
                 continue
 
+            page_prose = page.get("native_text") or page.get("ocr_text") or ""
             for table_index, table in enumerate(page.get("tables", []), start=1):
+                # Reject false-positive tables (paragraph text forced into a grid,
+                # or a reformatted copy of the page prose) before they pollute RAG.
+                if not self.validate_table(table, page_prose):
+                    logger.info(
+                        "Rejected non-table on page %s of %s (failed validate_table)",
+                        page_number,
+                        file_name,
+                    )
+                    continue
                 table_title = self._table_title(table, fallback=f"Table {table_index}")
                 table_markdown = self.table_to_markdown(table.get("header", []), table.get("rows", []))
                 for part_index, chunk_text in enumerate(self.chunk_table_text(table), start=1):

@@ -39,5 +39,6 @@ docling
 sentence-transformers
 rank-bm25
 ftfy  # repairs UTF-8/CP1252 mojibake in extracted/OCR text
+rapidfuzz  # fuzzy similarity for table validation / dedup
 transformers
 torch
