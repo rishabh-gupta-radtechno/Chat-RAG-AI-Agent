@@ -84,28 +84,22 @@ class PDFProcessor:
                     "(OCR may have failed, e.g. low memory).",
                     page_number,
                 )
-            # Tables come from a real text/vector layer. Gate on whether the page
-            # HAS one (a sparse, number-heavy data table still counts), not on
-            # whether the resolved page text is meaningful prose — otherwise a
-            # digital table page with little surrounding text would skip the
-            # table pass. A truly image-based page has no layer, so it is skipped
-            # (which also avoids camelot's "page is image-based" warning).
-            tables = (
-                self._extract_tables(filepath, page_number)
-                if self._has_extractable_text_layer(raw_native_text)
-                else []
-            )
-            # Image-based page (text came from OCR) -> reuse that OCR text for the
-            # page image instead of OCR-ing it a second time in the diagram path.
-            # If the page already yielded text (native or OCR), its embedded
-            # full-page scan is not a separate figure — keep it as an image
-            # pointer instead of re-OCR'ing the whole page into a giant chunk.
+            # Tables come from a real text/vector layer (a sparse data table still
+            # counts). A table-extraction failure must never lose the page.
+            tables = []
+            if self._has_extractable_text_layer(raw_native_text):
+                try:
+                    tables = self._extract_tables(filepath, page_number)
+                except Exception as exc:
+                    logger.warning("Table extraction failed on page %s: %s", page_number, exc)
             diagrams = self._extract_diagrams(
-                page_images,
-                tables,
-                file_id=file_id,
-                page_number=page_number,
-                page_ocr_text=(native_text or ocr_text) or None,
+                page_images, tables, file_id=file_id, page_number=page_number
+            )
+            logger.info(
+                "page=%s mode=traditional tables=%s images=%s diagrams=%s "
+                "text=%s ocr=%s",
+                page_number, len(tables), len(page_images), len(diagrams),
+                bool(native_text), bool(ocr_text),
             )
 
             pages.append(
@@ -221,18 +215,20 @@ class PDFProcessor:
             )
             # Prefer Docling's structured tables (with captions + cell grid). Fall
             # back to camelot/pdfplumber only for text-layer pages Docling missed.
+            # A table failure must never lose the page.
             tables = docling_tables.get(page_number, [])
             if not tables and self._has_extractable_text_layer(raw_native_text):
-                tables = self._extract_tables(filepath, page_number)
-            # If the page already yielded text (native or OCR), its embedded
-            # full-page scan is not a separate figure — keep it as an image
-            # pointer instead of re-OCR'ing the whole page into a giant chunk.
+                try:
+                    tables = self._extract_tables(filepath, page_number)
+                except Exception as exc:
+                    logger.warning("Table extraction failed on page %s: %s", page_number, exc)
             diagrams = self._extract_diagrams(
-                page_images,
-                tables,
-                file_id=file_id,
-                page_number=page_number,
-                page_ocr_text=(native_text or ocr_text) or None,
+                page_images, tables, file_id=file_id, page_number=page_number
+            )
+            logger.info(
+                "page=%s mode=docling tables=%s images=%s diagrams=%s text=%s ocr=%s",
+                page_number, len(tables), len(page_images), len(diagrams),
+                bool(native_text), bool(ocr_text),
             )
 
             pages.append({
@@ -465,10 +461,12 @@ class PDFProcessor:
             return {}
 
         images_by_page: Dict[int, List[Dict[str, Any]]] = {}
+        seen_hashes: set = set()  # dedup identical images (e.g. a logo on every page)
         try:
             with fitz.open(filepath) as document:
                 for page_index in range(len(document)):
                     page = document[page_index]
+                    page_area = abs(page.rect.width * page.rect.height) or 1.0
                     page_images: List[Dict[str, Any]] = []
                     for image_index, image_info in enumerate(page.get_images(full=True)):
                         xref = image_info[0]
@@ -480,9 +478,25 @@ class PDFProcessor:
                             if pix.n > 4:
                                 pix = fitz.Pixmap(fitz.csRGB, pix)
                             image_bytes = pix.tobytes("png")
+                            # Deduplicate repeated images (logos/headers) by content hash.
+                            image_hash = hashlib.md5(image_bytes).hexdigest()
+                            if image_hash in seen_hashes:
+                                continue
+                            seen_hashes.add(image_hash)
+                            # Fraction of the page this image covers — distinguishes a
+                            # full-page diagram/drawing from a small logo/icon.
+                            coverage = 0.0
+                            try:
+                                rects = page.get_image_rects(xref)
+                                if rects:
+                                    coverage = max(abs(r.width * r.height) for r in rects) / page_area
+                            except Exception:
+                                coverage = (pix.width * pix.height) / page_area
                             page_images.append({
                                 "image_index": image_index,
                                 "bytes": image_bytes,
+                                "hash": image_hash,
+                                "coverage": coverage,
                             })
                         except Exception as exc:
                             logger.warning(
@@ -885,50 +899,49 @@ class PDFProcessor:
         tables: list[Dict[str, Any]],
         file_id: Optional[str],
         page_number: int,
-        page_ocr_text: Optional[str] = None,
     ) -> list[Dict[str, Any]]:
-        """Build diagram records for a page's embedded images.
+        """Build diagram records for a page's significant embedded images.
 
-        When ``page_ocr_text`` is provided the page is image-based (a scan) and
-        was already OCR'd as a whole, so the embedded image *is* that page. We
-        keep the saved image for the diagram viewer but skip a second, redundant
-        OCR pass and do not re-emit the page text as a diagram chunk (it already
-        lives in the page's OCR chunk).
+        An image is treated as a diagram (engineering drawing, figure, or a
+        full-page scan) only when it covers >= ``diagram_min_coverage`` of the
+        page — this skips small logos/icons. Each kept image is OCR'd for its
+        labels and described, and the image is saved for the viewer. Redundant
+        full-page scans whose OCR merely repeats the page text are collapsed
+        later by chunk dedup (which links the image to the text chunk).
         """
         diagrams: list[Dict[str, Any]] = []
         if not images:
             return diagrams
 
-        image_based = page_ocr_text is not None
-
+        min_coverage = settings.diagram_min_coverage
         for image in images:
             image_bytes = image.get("bytes")
             if not image_bytes:
                 continue
+            # Small images (logos/icons) are not diagrams. Coverage defaults high
+            # so an image whose placement is unknown is kept rather than lost.
+            if image.get("coverage", 1.0) < min_coverage:
+                continue
 
-            if image_based:
-                # Reuse the page OCR text; do not OCR the same page image again.
-                extracted_text = ""
-                description = f"Scanned image of page {page_number}."
-            else:
-                extracted_text = self._run_ocr(image_bytes)
-                description = self._describe_diagram(image_bytes, extracted_text)
+            extracted_text = self._run_ocr(image_bytes)
+            description = self._describe_diagram(image_bytes, extracted_text)
+            if not description:
+                continue
 
-            if description:
-                image_url = self._save_diagram_image(
-                    file_id=file_id,
-                    page_number=page_number,
-                    image_index=image.get("image_index"),
-                    image_bytes=image_bytes,
-                )
-                diagrams.append(
-                    {
-                        "image_index": image.get("image_index"),
-                        "description": description.strip(),
-                        "ocr_text": extracted_text.strip(),
-                        "image_url": image_url,
-                    }
-                )
+            image_url = self._save_diagram_image(
+                file_id=file_id,
+                page_number=page_number,
+                image_index=image.get("image_index"),
+                image_bytes=image_bytes,
+            )
+            diagrams.append(
+                {
+                    "image_index": image.get("image_index"),
+                    "description": description.strip(),
+                    "ocr_text": extracted_text.strip(),
+                    "image_url": image_url,
+                }
+            )
 
         return diagrams
 

@@ -619,12 +619,20 @@ class TextProcessor:
             cleaned = self.clean_pdf_page_text(raw) if is_native else raw
             cleaned = self._strip_boilerplate(cleaned, boilerplate)
             page_type = self._detect_page_type(cleaned, page_number)
+            # A page carrying a table or a diagram is real content — never let the
+            # short-text "cover" heuristic mislabel it (that is what made the
+            # table-only page 2 disappear).
+            if page.get("tables") or page.get("diagrams"):
+                page_type = "content"
             document_page_number = self.extract_document_page_number(page.get("native_text", ""))
             page_meta[page_number] = {
                 "page_type": page_type,
                 "document_page_number": document_page_number,
             }
-            if page_type in self._SKIP_PAGE_TYPES or not cleaned.strip():
+            # Pages are never dropped by type anymore (a fallback below guarantees
+            # every page yields a chunk). Only skip the section loop when there is
+            # no text to chunk — the page's tables/diagrams are still handled.
+            if not cleaned.strip():
                 continue
             page_texts.append(
                 {
@@ -663,8 +671,6 @@ class TextProcessor:
             meta = page_meta.get(page_number, {"page_type": "content", "document_page_number": None})
             page_type = meta["page_type"]
             document_page_number = meta["document_page_number"]
-            if page_type in self._SKIP_PAGE_TYPES:
-                continue
 
             page_prose = page.get("native_text") or page.get("ocr_text") or ""
             for table_index, table in enumerate(page.get("tables", []), start=1):
@@ -716,6 +722,42 @@ class TextProcessor:
                     },
                 )
 
+        # Guarantee every page is represented: if a page produced no chunk at all
+        # (e.g. text was empty and its table was rejected), emit a fallback chunk
+        # so no page silently disappears.
+        pages_with_chunks = {c["metadata"].get("page_number") for c in chunks}
+        for page in page_documents:
+            page_number = page.get("page_number", 0)
+            if page_number in pages_with_chunks:
+                continue
+            meta = page_meta.get(page_number, {"page_type": "content", "document_page_number": None})
+            raw = (page.get("native_text") or page.get("ocr_text") or "").strip()
+            fallback = self._strip_boilerplate(self.clean_pdf_page_text(raw), boilerplate).strip() if raw else ""
+            fallback = fallback or f"Page {page_number} (no extractable text content)."
+            _add_chunk(
+                fallback,
+                {
+                    "file_name": file_name,
+                    "page_number": page_number,
+                    "document_page_number": meta["document_page_number"],
+                    "content_type": "text",
+                    "page_type": meta["page_type"],
+                    "section_number": None,
+                    "section_title": None,
+                    "chunk_id": f"{file_name}|page{page_number}|fallback|001",
+                },
+            )
+            logger.info("page=%s fallback chunk generated (no other content produced)", page_number)
+
+        # Diagnostics: chunks generated per page.
+        from collections import Counter
+        per_page = Counter(c["metadata"].get("page_number") for c in chunks)
+        logger.info(
+            "build_pdf_chunks: %s chunks across %s pages | per-page=%s",
+            len(chunks),
+            len({p.get("page_number") for p in page_documents}),
+            dict(sorted(per_page.items())),
+        )
         return chunks
 
     @staticmethod

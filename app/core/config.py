@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     ocr_engine: str = "paddleocr"
     ocr_lang: str = "en"  # PaddleOCR language code; mapped to the Tesseract equivalent
     enable_diagram_captioning: bool = False
+    # An embedded image covering >= this fraction of the page is treated as a real
+    # diagram/engineering drawing (OCR'd + described); smaller ones are logos/icons.
+    diagram_min_coverage: float = 0.15
     ocr_confidence_threshold: float = 0.6
     ocr_full_page: bool = True
     ocr_full_page_min_text_chars: int = 80

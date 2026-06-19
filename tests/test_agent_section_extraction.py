@@ -103,7 +103,12 @@ def test_build_pdf_chunks_deduplicates_repeated_page_chunks():
         },
     ]
 
+    # build_pdf_chunks no longer drops pages and emits one chunk per page segment;
+    # identical repeated content is collapsed by the dedup layer (deduplicate_chunks),
+    # which is where dedup now lives (it also runs embedding dedup in the RAG pipeline).
     chunks = processor.build_pdf_chunks(page_documents, "test-file.pdf")
+    deduped = processor.deduplicate_chunks(chunks)
 
-    assert len(chunks) == 1
-    assert chunks[0]["metadata"]["chunk_id"].startswith("test-file.pdf|page1|text|")
+    assert len(deduped) == 1
+    assert deduped[0]["metadata"]["content_type"] == "text"
+    assert deduped[0]["text"].strip().endswith("Test page content.")
