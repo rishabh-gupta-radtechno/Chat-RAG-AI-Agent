@@ -69,9 +69,10 @@ class ReActAgent:
         total_chars = 0
         char_limit = max_chars or settings.rag_context_max_chars
 
-        # Diagrams are presented in their own block, not the text context, and
-        # must not consume the text-document budget (e.g. neighbor-added pointers).
-        text_documents = [doc for doc in documents if doc.get("content_type") != "diagram"]
+        # Image-pointer chunks (diagrams, chart images) are surfaced via their own
+        # path, not the text context, and must not consume the text-document budget.
+        _image_pointer_types = {"diagram", "chart_image"}
+        text_documents = [doc for doc in documents if doc.get("content_type") not in _image_pointer_types]
 
         index = 0
         seen_tables: set = set()  # show each table once, in full, even if split across chunks

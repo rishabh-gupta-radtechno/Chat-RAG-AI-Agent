@@ -73,6 +73,8 @@ class RAGPipeline:
         try:
             if filepath.endswith(".pdf"):
                 page_documents = self.pdf_processor.extract_page_documents(filepath, file_id=str(file_id))
+                if settings.enable_chart_extraction:
+                    await self._extract_charts(filepath, page_documents, file_id)
                 chunks = self.text_processor.build_pdf_chunks(page_documents, filename)
                 # Stages 1 & 2: exact + diagram/fuzzy dedup before embedding.
                 chunks = self.text_processor.deduplicate_chunks(chunks)
@@ -446,6 +448,47 @@ class RAGPipeline:
         section_bonus = 1.0 if document.get("section_match") else 0.0
 
         return (semantic_score * 2.0) + lexical_score + content_bonus + section_bonus - page_type_penalty
+
+    async def _extract_charts(self, filepath: str, page_documents: list, file_id) -> None:
+        """Run the local vision model on chart-candidate pages and attach charts.
+
+        Best-effort and gated by enable_chart_extraction: any failure is logged
+        and skipped so chart analysis never blocks document ingestion.
+        """
+        try:
+            from app.ai.chart_extractor import ChartExtractor
+        except Exception as exc:
+            logger.warning("Chart extractor unavailable: %s", exc)
+            return
+
+        candidates = self.pdf_processor.chart_candidate_pages(filepath)
+        if not candidates:
+            return
+        extractor = ChartExtractor(self.llm_client)
+        for page in page_documents:
+            page_number = page.get("page_number")
+            if page_number not in candidates:
+                continue
+            # One image per chart region (a page may hold several side-by-side).
+            region_images = self.pdf_processor.chart_region_images(filepath, page_number)
+            for region_index, image in enumerate(region_images, start=1):
+                if not image:
+                    continue
+                chart = await extractor.analyze(image)
+                if not chart:
+                    continue
+                chart["image_url"] = self.pdf_processor._save_diagram_image(
+                    file_id=str(file_id),
+                    page_number=page_number,
+                    image_index=f"chart{region_index}",
+                    image_bytes=image,
+                )
+                page.setdefault("charts", []).append(chart)
+                logger.info(
+                    "page=%s region=%s chart extracted type=%s points=%s",
+                    page_number, region_index, chart.get("chart_type"),
+                    len(chart.get("structured_data", [])),
+                )
 
     @staticmethod
     def _dedup_by_embedding(vectors: list[dict]) -> list[dict]:

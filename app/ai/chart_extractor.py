@@ -1,0 +1,78 @@
+"""
+Chart understanding via a local Ollama vision model.
+
+Detects whether a rendered page image is a chart (pie/bar/line), extracts its
+title, categories and numeric values as structured data, and writes a short
+human summary. Runs on-prem so confidential pages never leave the host.
+"""
+
+import json
+import re
+from typing import Any, Dict, List, Optional
+
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class ChartExtractor:
+    """Turn a chart image into structured data + a human summary."""
+
+    PROMPT = (
+        "You are analysing one image of a document/slide page.\n"
+        "Decide if it primarily shows a data chart (pie, bar, or line).\n"
+        "Return ONLY valid JSON (no prose, no markdown fences) in exactly this shape:\n"
+        '{"is_chart": true, "chart_type": "pie|bar|line|other", '
+        '"title": "<chart title or empty>", '
+        '"data": [{"label": "<category or legend>", "value": "<number or percentage>"}], '
+        '"summary": "<one or two plain-English sentences naming the dominant values>"}\n'
+        'If the image is not a chart, return {"is_chart": false}.'
+    )
+
+    def __init__(self, llm_client: Any) -> None:
+        self._llm = llm_client
+
+    async def analyze(self, image_bytes: bytes) -> Optional[Dict[str, Any]]:
+        """Return a chart record, or None if the image is not a chart / on error."""
+        if not image_bytes:
+            return None
+        try:
+            raw = await self._llm.vision(self.PROMPT, image_bytes)
+        except Exception as exc:  # vision failure must never abort ingestion
+            logger.warning("Chart vision call failed: %s", exc)
+            return None
+
+        parsed = self._parse_json(raw)
+        if not parsed or not parsed.get("is_chart"):
+            return None
+
+        data = parsed.get("data")
+        return {
+            "chart_type": str(parsed.get("chart_type") or "other").strip().lower(),
+            "title": str(parsed.get("title") or "").strip(),
+            "structured_data": data if isinstance(data, list) else [],
+            "summary": str(parsed.get("summary") or "").strip(),
+        }
+
+    @staticmethod
+    def _parse_json(raw: str) -> Optional[Dict[str, Any]]:
+        """Parse the model's reply into a dict, tolerating markdown fences/prose."""
+        if not raw:
+            return None
+        text = raw.strip()
+        # Strip ```json ... ``` fences if present.
+        fence = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL)
+        if fence:
+            text = fence.group(1).strip()
+        # Otherwise take the outermost JSON object.
+        if not text.startswith("{"):
+            start, end = text.find("{"), text.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return None
+            text = text[start : end + 1]
+        try:
+            value = json.loads(text)
+            return value if isinstance(value, dict) else None
+        except (ValueError, TypeError):
+            logger.debug("Could not parse chart JSON: %s", raw[:200])
+            return None

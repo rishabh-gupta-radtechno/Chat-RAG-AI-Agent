@@ -21,6 +21,7 @@ class OllamaClient:
         self.base_url = settings.ollama_base_url
         self.model = settings.ollama_chat_model
         self.embedding_model = settings.ollama_embedding_model
+        self.vision_model = settings.chart_vision_model
         self.embeddings_path = settings.ollama_embeddings_path
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -31,6 +32,31 @@ class OllamaClient:
                 pool=10.0,
             )
         )
+
+    async def vision(self, prompt: str, image_bytes: bytes, temperature: float = 0.0) -> str:
+        """Run a local Ollama vision model on an image and return its text reply.
+
+        Used for chart understanding (kept on-prem so confidential pages never
+        leave the host). Image is sent base64-encoded per the Ollama /api/generate
+        ``images`` field.
+        """
+        import base64
+
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        response = await self.client.post(
+            f"{self.base_url.rstrip('/')}/api/generate",
+            json={
+                "model": self.vision_model,
+                "prompt": prompt,
+                "images": [b64],
+                "options": {"temperature": temperature},
+                "keep_alive": "5m",
+                "stream": False,
+            },
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Ollama vision error: {response.status_code} {response.text}")
+        return (response.json().get("response") or "").strip()
 
     async def generate(
         self,

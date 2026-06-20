@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     # An embedded image covering >= this fraction of the page is treated as a real
     # diagram/engineering drawing (OCR'd + described); smaller ones are logos/icons.
     diagram_min_coverage: float = 0.15
+
+    # Chart extraction (pie/bar/line) via a LOCAL Ollama vision model. Off by
+    # default — needs the vision model pulled and adds memory; keeps data on-prem.
+    enable_chart_extraction: bool = True
+    chart_vision_model: str = "qwen2.5-vl:7b"  # any Ollama vision model
+    # A page with at least this many vector drawing ops is a chart/figure candidate
+    # (PowerPoint/Excel charts export as vector paths, invisible to get_images()).
+    chart_candidate_min_drawings: int = 40
     ocr_confidence_threshold: float = 0.6
     ocr_full_page: bool = True
     ocr_full_page_min_text_chars: int = 80

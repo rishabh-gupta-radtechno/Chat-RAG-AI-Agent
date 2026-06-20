@@ -453,7 +453,10 @@ class TextProcessor:
         return segments
 
     # Higher = preferred to keep when two chunks are duplicates.
-    _DEDUP_PRIORITY = {"text": 4, "table": 4, "ocr": 3, "diagram": 1}
+    _DEDUP_PRIORITY = {
+        "text": 4, "table": 4, "chart_data": 4, "chart_summary": 4,
+        "ocr": 3, "diagram": 1, "chart_image": 1,
+    }
 
     @staticmethod
     def _dedup_norm(text: str) -> str:
@@ -619,10 +622,10 @@ class TextProcessor:
             cleaned = self.clean_pdf_page_text(raw) if is_native else raw
             cleaned = self._strip_boilerplate(cleaned, boilerplate)
             page_type = self._detect_page_type(cleaned, page_number)
-            # A page carrying a table or a diagram is real content — never let the
-            # short-text "cover" heuristic mislabel it (that is what made the
-            # table-only page 2 disappear).
-            if page.get("tables") or page.get("diagrams"):
+            # A page carrying a table, diagram, or chart is real content — never
+            # let the short-text "cover" heuristic mislabel it (that is what made
+            # the table-only page 2 disappear).
+            if page.get("tables") or page.get("diagrams") or page.get("charts"):
                 page_type = "content"
             document_page_number = self.extract_document_page_number(page.get("native_text", ""))
             page_meta[page_number] = {
@@ -721,6 +724,49 @@ class TextProcessor:
                         "chunk_id": f"{file_name}|page{page_number}|diagram|{diagram_index:03d}",
                     },
                 )
+
+            # Charts: a vision model produced structured data + a summary. Emit
+            # linked chunks — data (with structured_data), summary (embedded for
+            # retrieval), and an image pointer — all sharing a related_chart id.
+            for chart_index, chart in enumerate(page.get("charts", []), start=1):
+                chart_id = f"chart_{page_number}_{chart_index}"
+                chart_type = str(chart.get("chart_type") or "chart")
+                chart_title = self.fix_mojibake(chart.get("title") or "").strip()
+                structured = chart.get("structured_data") or []
+                summary = self.fix_mojibake(chart.get("summary") or "").strip()
+                image_url = chart.get("image_url")
+                base = {
+                    "file_name": file_name,
+                    "page_number": page_number,
+                    "document_page_number": document_page_number,
+                    "page_type": page_type,
+                    "related_chart": chart_id,
+                    "chart_type": chart_type,
+                    "chart_title": chart_title,
+                    "image_url": image_url,
+                }
+                points = "; ".join(
+                    f"{d.get('label', '')}={d.get('value', '')}"
+                    for d in structured
+                    if isinstance(d, dict) and d.get("label")
+                )
+                _add_chunk(
+                    f"{chart_type} chart: {chart_title}\n{points}".strip(),
+                    {**base, "content_type": "chart_data", "structured_data": structured,
+                     "chunk_id": f"{file_name}|page{page_number}|chartdata|{chart_index:03d}"},
+                )
+                if summary:
+                    _add_chunk(
+                        summary,
+                        {**base, "content_type": "chart_summary",
+                         "chunk_id": f"{file_name}|page{page_number}|chartsummary|{chart_index:03d}"},
+                    )
+                if image_url:
+                    _add_chunk(
+                        f"Chart image: {chart_title or chart_type} (page {page_number}).",
+                        {**base, "content_type": "chart_image",
+                         "chunk_id": f"{file_name}|page{page_number}|chartimage|{chart_index:03d}"},
+                    )
 
         # Guarantee every page is represented: if a page produced no chunk at all
         # (e.g. text was empty and its table was rejected), emit a fallback chunk

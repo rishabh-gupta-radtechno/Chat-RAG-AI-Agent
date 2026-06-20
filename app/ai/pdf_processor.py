@@ -384,6 +384,129 @@ class PDFProcessor:
 
         return rendered_pages
 
+    def render_page_png(self, filepath: str, page_number: int, scale: float = 2.0) -> Optional[bytes]:
+        """Render a single page to PNG bytes (for vision/chart analysis)."""
+        try:
+            import fitz
+        except ImportError:
+            return None
+        try:
+            with fitz.open(filepath) as document:
+                if not (1 <= page_number <= len(document)):
+                    return None
+                pix = document[page_number - 1].get_pixmap(
+                    matrix=fitz.Matrix(scale, scale), alpha=False
+                )
+                return pix.tobytes("png")
+        except Exception as exc:
+            logger.warning("Failed to render page %s: %s", page_number, exc)
+            return None
+
+    def chart_region_images(self, filepath: str, page_number: int, scale: float = 2.0) -> List[bytes]:
+        """Split a page into chart regions and render each to PNG.
+
+        Vector charts are clusters of drawing ops; pages often hold several
+        side-by-side (e.g. two pie charts). We cluster the drawings into separated
+        regions and crop each, so every chart is analysed on its own. Falls back
+        to the whole page when there is only one (or no) clear region.
+        """
+        try:
+            import fitz
+        except ImportError:
+            return []
+        try:
+            with fitz.open(filepath) as document:
+                if not (1 <= page_number <= len(document)):
+                    return []
+                page = document[page_number - 1]
+                matrix = fitz.Matrix(scale, scale)
+                regions = self._cluster_drawing_regions(page)
+                if len(regions) < 2:
+                    return [page.get_pixmap(matrix=matrix, alpha=False).tobytes("png")]
+                images: List[bytes] = []
+                for rect in regions:
+                    pix = page.get_pixmap(matrix=matrix, clip=rect, alpha=False)
+                    images.append(pix.tobytes("png"))
+                return images
+        except Exception as exc:
+            logger.warning("chart_region_images failed page %s: %s", page_number, exc)
+            return []
+
+    @staticmethod
+    def _cluster_drawing_regions(page: Any) -> List[Any]:
+        """Cluster a page's vector-drawing rects into separated regions (charts)."""
+        import fitz
+
+        page_rect = page.rect
+        page_area = abs(page_rect.width * page_rect.height) or 1.0
+        rects = []
+        try:
+            drawings = page.get_drawings()
+        except Exception:
+            return []
+        for drawing in drawings:
+            rect = drawing.get("rect")
+            if rect is None or abs(rect.width * rect.height) < page_area * 0.0005:
+                continue  # skip hairline strokes / dots
+            rects.append(fitz.Rect(rect))
+        if not rects:
+            return []
+
+        # Merge rects that touch (within a small gap) into connected clusters.
+        gap = min(page_rect.width, page_rect.height) * 0.04
+        clusters: List[Any] = []
+        for rect in rects:
+            grown = fitz.Rect(rect.x0 - gap, rect.y0 - gap, rect.x1 + gap, rect.y1 + gap)
+            target = next((c for c in clusters if c.intersects(grown)), None)
+            if target is None:
+                clusters.append(fitz.Rect(rect))
+            else:
+                target.include_rect(rect)
+
+        # Iterate until clusters stop merging (handles transitive overlaps).
+        changed = True
+        while changed and len(clusters) > 1:
+            changed = False
+            merged: List[Any] = []
+            for cluster in clusters:
+                hit = next((m for m in merged if m.intersects(cluster)), None)
+                if hit is None:
+                    merged.append(fitz.Rect(cluster))
+                else:
+                    hit.include_rect(cluster)
+                    changed = True
+            clusters = merged
+
+        # Keep only regions large enough to be a real chart; biggest first.
+        big = [c for c in clusters if abs(c.width * c.height) >= page_area * 0.05]
+        big.sort(key=lambda c: abs(c.width * c.height), reverse=True)
+        return big[:4]
+
+    def chart_candidate_pages(self, filepath: str) -> set:
+        """Pages likely to contain a chart — i.e. drawing-heavy pages.
+
+        PowerPoint/Excel charts export as many vector path operations (invisible
+        to get_images()), so a high vector-drawing count is a reliable signal and
+        avoids wasting vision calls on plain text or scanned pages (~0 drawings).
+        """
+        candidates: set = set()
+        try:
+            import fitz
+        except ImportError:
+            return candidates
+        threshold = settings.chart_candidate_min_drawings
+        try:
+            with fitz.open(filepath) as document:
+                for index in range(len(document)):
+                    try:
+                        if len(document[index].get_drawings()) >= threshold:
+                            candidates.add(index + 1)
+                    except Exception:
+                        continue
+        except Exception as exc:
+            logger.warning("chart_candidate_pages failed: %s", exc)
+        return candidates
+
     @staticmethod
     def _is_meaningful_text(text: str) -> bool:
         """Whether a page's native text layer is real content, not CID/encoding junk.
