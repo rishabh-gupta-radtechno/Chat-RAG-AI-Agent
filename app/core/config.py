@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     # Chart extraction (pie/bar/line) via a LOCAL Ollama vision model. Off by
     # default — needs the vision model pulled and adds memory; keeps data on-prem.
     enable_chart_extraction: bool = True
-    chart_vision_model: str = "qwen2.5-vl:7b"  # any Ollama vision model
+    chart_vision_model: str = "qwen2.5vl:7b"  # any Ollama vision model
     # A page with at least this many vector drawing ops is a chart/figure candidate
     # (PowerPoint/Excel charts export as vector paths, invisible to get_images()).
     chart_candidate_min_drawings: int = 40
