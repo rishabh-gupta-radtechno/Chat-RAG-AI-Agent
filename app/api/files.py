@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status,
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user_id
-from app.db.database import get_db
+from app.db.database import get_db, AsyncSessionLocal
 from app.schemas import FileListResponse, FileUploadResponse, SyncEmbeddingsResponse
 from app.services.file import FileService
 from app.ai.rag import RAGPipeline
@@ -158,23 +158,33 @@ async def sync_embeddings(
 
         file_service = FileService(session)
         file_obj = await file_service.get_file(file_uuid)
-        logger.info(f"file UUID: {file_uuid}, file object: {file_obj}") 
+        logger.info(f"file UUID: {file_uuid}, file object: {file_obj}")
         if not file_obj or file_obj.uploaded_by != user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+        # Capture fields before the long-running step below: document processing
+        # (OCR + Docling + vision) can run for minutes, during which the
+        # request-scoped DB connection is idle and may be dropped by the server.
+        filepath = file_obj.filepath
+        filename = file_obj.filename
 
         # Process embeddings
         rag_pipeline = RAGPipeline()
         await rag_pipeline.initialize()
         await rag_pipeline.vector_db.delete_by_file_id(str(file_uuid))
         chunks_created = await rag_pipeline.process_document(
-            filepath=file_obj.filepath,
+            filepath=filepath,
             file_id=file_uuid,
-            filename=file_obj.filename,
+            filename=filename,
             user_id=user_id,
         )
 
-        # Mark file as embedded
-        await file_service.mark_as_embedded(file_uuid)
+        # Mark file as embedded on a FRESH session — the request-scoped one above
+        # may have lost its connection during the long processing step (asyncpg
+        # "the underlying connection is closed"). A new session checks out a
+        # validated connection (pool_pre_ping).
+        async with AsyncSessionLocal() as fresh_session:
+            await FileService(fresh_session).mark_as_embedded(file_uuid)
 
         return SyncEmbeddingsResponse(
             file_id=file_uuid,
