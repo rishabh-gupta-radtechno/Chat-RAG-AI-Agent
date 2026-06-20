@@ -94,9 +94,10 @@ class Settings(BaseSettings):
     # default — needs the vision model pulled and adds memory; keeps data on-prem.
     enable_chart_extraction: bool = True
     chart_vision_model: str = "qwen2.5vl:7b"  # any Ollama vision model
-    # A page with at least this many vector drawing ops is a chart/figure candidate
-    # (PowerPoint/Excel charts export as vector paths, invisible to get_images()).
-    chart_candidate_min_drawings: int = 40
+    # A page with at least this many vector drawing ops is a chart/figure candidate.
+    # Kept low because a simple pie chart can be only ~2 drawing ops; other signals
+    # (large raster, chart-like %/number text) also flag candidates.
+    chart_candidate_min_drawings: int = 6
     ocr_confidence_threshold: float = 0.6
     ocr_full_page: bool = True
     ocr_full_page_min_text_chars: int = 80

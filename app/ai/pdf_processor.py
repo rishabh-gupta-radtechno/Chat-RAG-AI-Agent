@@ -483,29 +483,67 @@ class PDFProcessor:
         return big[:4]
 
     def chart_candidate_pages(self, filepath: str) -> set:
-        """Pages likely to contain a chart — i.e. drawing-heavy pages.
+        """Pages likely to contain a chart, by any of three signals.
 
-        PowerPoint/Excel charts export as many vector path operations (invisible
-        to get_images()), so a high vector-drawing count is a reliable signal and
-        avoids wasting vision calls on plain text or scanned pages (~0 drawings).
+        A single signal is unreliable (a PowerPoint pie chart can be only ~2
+        vector drawings, while a bar chart is dozens), so a page is a candidate
+        if it has enough vector drawings, OR a large raster image, OR chart-like
+        text (many %/number labels with few sentences). Vision then confirms or
+        rejects each candidate, so over-including is cheap-ish; pure prose pages
+        are still skipped to avoid wasting vision calls on manuals.
         """
         candidates: set = set()
         try:
             import fitz
         except ImportError:
             return candidates
-        threshold = settings.chart_candidate_min_drawings
         try:
             with fitz.open(filepath) as document:
-                for index in range(len(document)):
-                    try:
-                        if len(document[index].get_drawings()) >= threshold:
-                            candidates.add(index + 1)
-                    except Exception:
-                        continue
+                page_total = len(document)
+                for index in range(page_total):
+                    reason = self._chart_candidate_reason(document[index])
+                    if reason:
+                        candidates.add(index + 1)
+                        logger.info("page=%s chart-candidate (%s)", index + 1, reason)
         except Exception as exc:
             logger.warning("chart_candidate_pages failed: %s", exc)
+            return candidates
+        logger.info("chart candidates: %s of %s pages -> %s",
+                    len(candidates), page_total, sorted(candidates))
         return candidates
+
+    @classmethod
+    def _chart_candidate_reason(cls, page: Any) -> Optional[str]:
+        """Return why a page looks like a chart, or None."""
+        try:
+            drawings = len(page.get_drawings())
+        except Exception:
+            drawings = 0
+        if drawings >= settings.chart_candidate_min_drawings:
+            return f"drawings={drawings}"
+
+        page_area = abs(page.rect.width * page.rect.height) or 1.0
+        try:
+            for image_info in page.get_images(full=True):
+                rects = page.get_image_rects(image_info[0])
+                if rects and max(abs(r.width * r.height) for r in rects) >= page_area * settings.diagram_min_coverage:
+                    return "large_raster"
+        except Exception:
+            pass
+
+        if cls._looks_like_chart_text(page.get_text() or ""):
+            return "chart_like_text"
+        return None
+
+    @staticmethod
+    def _looks_like_chart_text(text: str) -> bool:
+        """Heuristic: chart slides are dominated by short %/number labels, not prose."""
+        if not text.strip():
+            return False
+        numbers = len(re.findall(r"\d+\s*%|\b\d{1,4}\b", text))
+        sentences = len(re.findall(r"[.!?](?:\s|$)", text))
+        words = max(len(text.split()), 1)
+        return numbers >= 8 and sentences <= 6 and (numbers / words) >= 0.12
 
     @staticmethod
     def _is_meaningful_text(text: str) -> bool:

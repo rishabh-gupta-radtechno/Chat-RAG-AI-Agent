@@ -117,6 +117,22 @@ def test_chart_region_splitting_two_charts(tmp_path):
     assert len(images) == 2, f"two separated chart regions expected, got {len(images)}"
 
 
+def test_looks_like_chart_text_separates_charts_from_prose():
+    P = PDFProcessor
+    pie = ("Reasons for DV Failure Brake not applied 5% DV malfunctioning 8% DV leakage 54% "
+           "DV piston rolling 1% DV R charger defective 3% Brake Auto release 1% "
+           "Release choke defective 2% DV sensivity issue 2% Other DV defects 8% Data Not available 14%")
+    bar = ("DV Isolated Vs Replaced 500 457 450 435 424 404 400 371 373 358 226 197 131 123 "
+           "103 94 93 71 57 56 55 49 40 26 20 16 11 SWR ECoR SECR WR NER NCR SR ECR NWR")
+    prose = ("Key Observations DV leakage is the most major failure in Zonal Railways. "
+             "Escorts make DV has highest failure. KEO type DV is produced by Escorts and KNORR. "
+             "NER and SCR have minimal DV failures.")
+    assert P._looks_like_chart_text(pie) is True       # the page-1 pie (only 2 drawings) is now caught
+    assert P._looks_like_chart_text(bar) is True
+    assert P._looks_like_chart_text(prose) is False     # text slide is skipped
+    assert P._looks_like_chart_text("") is False
+
+
 def test_chart_region_single_falls_back_to_whole_page(tmp_path):
     fitz = __import__("fitz")
     pdf = tmp_path / "onechart.pdf"
