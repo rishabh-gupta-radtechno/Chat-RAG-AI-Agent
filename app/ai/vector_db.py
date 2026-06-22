@@ -326,7 +326,8 @@ class VectorDBClient:
                     }
                 )
 
-        # 2. Standalone diagram chunks on the same file/page as a retrieved chunk.
+        # 2. Standalone diagram AND chart-image chunks on the same file/page as a
+        #    retrieved chunk (chart_image carries a rendered pie/bar/line PNG).
         source_pages = {
             (str(source.get("file_id")), source.get("page_number"))
             for source in sources
@@ -334,7 +335,7 @@ class VectorDBClient:
         }
         if source_pages:
             for document in await self._get_all_documents(user_id=user_id):
-                if document.get("content_type") != "diagram":
+                if document.get("content_type") not in ("diagram", "chart_image"):
                     continue
                 key = (str(document.get("file_id")), document.get("page_number"))
                 if key not in source_pages:

@@ -578,6 +578,20 @@ class TextProcessor:
             logger.info("Deduplicated chunks: %d -> %d (text/diagram dedup)", before, len(final))
         return final
 
+    @staticmethod
+    def _format_chart_value(value) -> str:
+        """Render a chart data point value as readable text.
+
+        The vision model is asked for a single number/percentage per point, but
+        if it returns a list (a whole series) or dict, flatten it gracefully so
+        the chunk text never contains Python list repr like ['94', '57'].
+        """
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(v) for v in value)
+        if isinstance(value, dict):
+            return ", ".join(f"{k}: {v}" for k, v in value.items())
+        return str(value)
+
     def build_pdf_chunks(self, page_documents: list[dict], file_name: str) -> list[dict]:
         """Create metadata-rich chunks for a PDF with page-aware sections."""
         chunks: list[dict] = []
@@ -746,7 +760,7 @@ class TextProcessor:
                     "image_url": image_url,
                 }
                 points = "; ".join(
-                    f"{d.get('label', '')}={d.get('value', '')}"
+                    f"{d.get('label', '')}={self._format_chart_value(d.get('value', ''))}"
                     for d in structured
                     if isinstance(d, dict) and d.get("label")
                 )

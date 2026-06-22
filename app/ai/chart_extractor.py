@@ -18,9 +18,25 @@ logger = get_logger(__name__)
 class ChartExtractor:
     """Turn a chart image into structured data + a human summary."""
 
+    # Shared rules so single and multi prompts extract COMPLETE, well-structured data.
+    _DATA_RULES = (
+        "Extract EVERY data point you can read — do not omit or summarise any slice, "
+        "bar, or marker.\n"
+        "Rules for the data list:\n"
+        "- Each entry is ONE slice/bar/point: "
+        '{"label": "<name>", "value": "<single number or percentage>"}.\n'
+        "- value must be a single number or percent string, NEVER a list or array.\n"
+        "- Pie: label = slice name, value = its percentage.\n"
+        "- Bar/line with x-axis categories: label = the category (e.g. \"SWR\"). "
+        "If there are MULTIPLE series (grouped or stacked bars), output one entry "
+        'PER bar with label = "<category> - <series name>" (e.g. "SWR - Found Defective").\n'
+        "- Read every x-axis tick label and every legend name; do not skip any category.\n"
+    )
+
     PROMPT = (
         "You are analysing one image of a document/slide page.\n"
         "Decide if it primarily shows a data chart (pie, bar, or line).\n"
+        + _DATA_RULES +
         "Return ONLY valid JSON (no prose, no markdown fences) in exactly this shape:\n"
         '{"is_chart": true, "chart_type": "pie|bar|line|other", '
         '"title": "<chart title or empty>", '
@@ -34,6 +50,7 @@ class ChartExtractor:
         "It may contain MORE THAN ONE data chart (for example two pie charts side "
         "by side, or a chart next to a table). Identify EVERY distinct data chart "
         "(pie, bar, or line) separately — do not merge them.\n"
+        + _DATA_RULES +
         "Return ONLY valid JSON (no prose, no markdown fences) in exactly this shape:\n"
         '{"charts": [{"chart_type": "pie|bar|line|other", '
         '"title": "<that chart\'s title or empty>", '

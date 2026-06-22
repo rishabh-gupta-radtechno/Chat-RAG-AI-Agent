@@ -133,6 +133,30 @@ def test_build_pdf_chunks_multiple_charts_per_page():
     assert any("34%" in s for s in summaries) and any("45%" in s for s in summaries)
 
 
+def test_format_chart_value_flattens_lists_and_dicts():
+    f = TextProcessor._format_chart_value
+    assert f(["94", "57"]) == "94, 57"
+    assert f("54%") == "54%"
+    assert f({"Found": 94, "Replaced": 71}) == "Found: 94, Replaced: 71"
+
+
+def test_build_pdf_chunks_renders_series_list_without_python_repr():
+    tp = TextProcessor()
+    pages = [{
+        "page_number": 3, "native_text": "DV Isolated Vs Replaced " + "x " * 40, "ocr_text": "",
+        "tables": [], "diagrams": [],
+        "charts": [{
+            "chart_type": "bar", "title": "DV Isolated Vs Replaced",
+            "structured_data": [{"label": "Found Defective", "value": ["94", "57"]}],
+            "summary": "Comparison across zones.", "image_url": "/x.png",
+        }],
+    }]
+    chunks = tp.build_pdf_chunks(pages, "deck.pdf")
+    data_chunk = next(c for c in chunks if c["metadata"].get("content_type") == "chart_data")
+    assert "Found Defective=94, 57" in data_chunk["text"]
+    assert "['94'" not in data_chunk["text"]  # never leak python list repr
+
+
 def test_chart_region_splitting_two_charts(tmp_path):
     fitz = __import__("fitz")
     pdf = tmp_path / "twocharts.pdf"
