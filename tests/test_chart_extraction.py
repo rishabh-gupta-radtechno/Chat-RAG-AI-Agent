@@ -51,6 +51,35 @@ def test_analyze_non_chart_and_vision_error_return_none():
     assert asyncio.run(ChartExtractor(_Boom()).analyze(b"x")) is None
 
 
+def test_analyze_many_splits_two_pies_in_one_image():
+    reply = json.dumps({"charts": [
+        {"chart_type": "Pie", "title": "DV Failure Make Wise",
+         "data": [{"label": "ESCORTS", "value": "34%"}],
+         "summary": "Escorts make has the highest failure at 34%."},
+        {"chart_type": "pie", "title": "DV Failure Type Wise",
+         "data": [{"label": "KEO", "value": "45%"}],
+         "summary": "KEO type is highest at 45%."},
+    ]})
+    recs = asyncio.run(ChartExtractor(_FakeVisionLLM(reply)).analyze_many(b"PNG"))
+    assert len(recs) == 2
+    assert {r["title"] for r in recs} == {"DV Failure Make Wise", "DV Failure Type Wise"}
+    assert recs[0]["chart_type"] == "pie"  # normalized
+
+
+def test_analyze_many_accepts_single_object_and_rejects_non_chart():
+    single = json.dumps({"is_chart": True, "chart_type": "bar", "title": "T",
+                         "data": [{"label": "a", "value": 1}], "summary": "s"})
+    assert len(asyncio.run(ChartExtractor(_FakeVisionLLM(single)).analyze_many(b"x"))) == 1
+    assert asyncio.run(ChartExtractor(_FakeVisionLLM('{"charts": []}')).analyze_many(b"x")) == []
+    assert asyncio.run(ChartExtractor(_FakeVisionLLM('{"is_chart": false}')).analyze_many(b"x")) == []
+
+    class _Boom:
+        async def vision(self, prompt, image_bytes):
+            raise RuntimeError("vision down")
+
+    assert asyncio.run(ChartExtractor(_Boom()).analyze_many(b"x")) == []
+
+
 def test_build_pdf_chunks_creates_linked_chart_chunks():
     tp = TextProcessor()
     pages = [{

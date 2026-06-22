@@ -29,6 +29,20 @@ class ChartExtractor:
         'If the image is not a chart, return {"is_chart": false}.'
     )
 
+    PROMPT_MULTI = (
+        "You are analysing one image of a document/slide page.\n"
+        "It may contain MORE THAN ONE data chart (for example two pie charts side "
+        "by side, or a chart next to a table). Identify EVERY distinct data chart "
+        "(pie, bar, or line) separately — do not merge them.\n"
+        "Return ONLY valid JSON (no prose, no markdown fences) in exactly this shape:\n"
+        '{"charts": [{"chart_type": "pie|bar|line|other", '
+        '"title": "<that chart\'s title or empty>", '
+        '"data": [{"label": "<category or legend>", "value": "<number or percentage>"}], '
+        '"summary": "<one or two plain-English sentences naming the dominant values>"}]}\n'
+        "Return one object per chart, in reading order. If there are no charts, "
+        'return {"charts": []}.'
+    )
+
     def __init__(self, llm_client: Any) -> None:
         self._llm = llm_client
 
@@ -53,6 +67,46 @@ class ChartExtractor:
             "structured_data": data if isinstance(data, list) else [],
             "summary": str(parsed.get("summary") or "").strip(),
         }
+
+    async def analyze_many(self, image_bytes: bytes) -> List[Dict[str, Any]]:
+        """Return every chart in the image (handles multiple charts on one page).
+
+        A page may render as a single image (e.g. a flattened slide with two pie
+        charts that has no separable vector regions), so we ask the model for a
+        list and emit one record per chart. Best-effort: returns [] on error or
+        when the image holds no charts.
+        """
+        if not image_bytes:
+            return []
+        try:
+            raw = await self._llm.vision(self.PROMPT_MULTI, image_bytes)
+        except Exception as exc:  # vision failure must never abort ingestion
+            logger.warning("Chart vision call failed: %s", exc)
+            return []
+
+        parsed = self._parse_json(raw)
+        if not parsed:
+            return []
+        charts = parsed.get("charts")
+        if charts is None:
+            # Model replied with a single-chart object instead of a list.
+            charts = [parsed] if parsed.get("is_chart") else []
+
+        records: List[Dict[str, Any]] = []
+        for chart in charts:
+            if not isinstance(chart, dict) or chart.get("is_chart") is False:
+                continue
+            data = chart.get("data")
+            record = {
+                "chart_type": str(chart.get("chart_type") or "other").strip().lower(),
+                "title": str(chart.get("title") or "").strip(),
+                "structured_data": data if isinstance(data, list) else [],
+                "summary": str(chart.get("summary") or "").strip(),
+            }
+            # Skip empty shells (no data and no summary).
+            if record["structured_data"] or record["summary"]:
+                records.append(record)
+        return records
 
     @staticmethod
     def _parse_json(raw: str) -> Optional[Dict[str, Any]]:

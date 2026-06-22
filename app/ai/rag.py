@@ -461,34 +461,44 @@ class RAGPipeline:
             logger.warning("Chart extractor unavailable: %s", exc)
             return
 
+        # Geometry pre-pass over the PDF (vector drawings / raster / native text).
         candidates = self.pdf_processor.chart_candidate_pages(filepath)
-        if not candidates:
-            return
         extractor = ChartExtractor(self.llm_client)
         for page in page_documents:
             page_number = page.get("page_number")
-            if page_number not in candidates:
+            # A flattened slide deck has no text layer (pages arrive as OCR) and a
+            # pie chart is only ~2 vector drawings, so the geometry pass misses it.
+            # Fall back to the text the pipeline already OCR'd: chart slides are
+            # dominated by %/number labels.
+            page_text = f"{page.get('native_text') or ''} {page.get('ocr_text') or ''}"
+            text_is_chart_like = self.pdf_processor._looks_like_chart_text(page_text)
+            if page_number not in candidates and not text_is_chart_like:
                 continue
+            if page_number not in candidates:
+                logger.info("page=%s chart-candidate (ocr_chart_like_text)", page_number)
             # One image per chart region (a page may hold several side-by-side).
             region_images = self.pdf_processor.chart_region_images(filepath, page_number)
             for region_index, image in enumerate(region_images, start=1):
                 if not image:
                     continue
-                chart = await extractor.analyze(image)
-                if not chart:
+                # analyze_many handles >1 chart in a single (e.g. flattened) image.
+                charts = await extractor.analyze_many(image)
+                if not charts:
                     continue
-                chart["image_url"] = self.pdf_processor._save_diagram_image(
+                image_url = self.pdf_processor._save_diagram_image(
                     file_id=str(file_id),
                     page_number=page_number,
                     image_index=f"chart{region_index}",
                     image_bytes=image,
                 )
-                page.setdefault("charts", []).append(chart)
-                logger.info(
-                    "page=%s region=%s chart extracted type=%s points=%s",
-                    page_number, region_index, chart.get("chart_type"),
-                    len(chart.get("structured_data", [])),
-                )
+                for chart in charts:
+                    chart["image_url"] = image_url
+                    page.setdefault("charts", []).append(chart)
+                    logger.info(
+                        "page=%s region=%s chart extracted type=%s points=%s",
+                        page_number, region_index, chart.get("chart_type"),
+                        len(chart.get("structured_data", [])),
+                    )
 
     @staticmethod
     def _dedup_by_embedding(vectors: list[dict]) -> list[dict]:
