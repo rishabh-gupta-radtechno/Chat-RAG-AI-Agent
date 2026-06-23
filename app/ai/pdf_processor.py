@@ -384,12 +384,13 @@ class PDFProcessor:
 
         return rendered_pages
 
-    def render_page_png(self, filepath: str, page_number: int, scale: float = 2.0) -> Optional[bytes]:
+    def render_page_png(self, filepath: str, page_number: int, scale: Optional[float] = None) -> Optional[bytes]:
         """Render a single page to PNG bytes (for vision/chart analysis)."""
         try:
             import fitz
         except ImportError:
             return None
+        scale = scale if scale is not None else settings.chart_render_scale
         try:
             with fitz.open(filepath) as document:
                 if not (1 <= page_number <= len(document)):
@@ -402,18 +403,22 @@ class PDFProcessor:
             logger.warning("Failed to render page %s: %s", page_number, exc)
             return None
 
-    def chart_region_images(self, filepath: str, page_number: int, scale: float = 2.0) -> List[bytes]:
+    def chart_region_images(self, filepath: str, page_number: int, scale: Optional[float] = None) -> List[bytes]:
         """Split a page into chart regions and render each to PNG.
 
         Vector charts are clusters of drawing ops; pages often hold several
         side-by-side (e.g. two pie charts). We cluster the drawings into separated
         regions and crop each, so every chart is analysed on its own. Falls back
         to the whole page when there is only one (or no) clear region.
+
+        ``scale`` defaults to ``settings.chart_render_scale`` (higher = sharper
+        labels for the vision model, more memory).
         """
         try:
             import fitz
         except ImportError:
             return []
+        scale = scale if scale is not None else settings.chart_render_scale
         try:
             with fitz.open(filepath) as document:
                 if not (1 <= page_number <= len(document)):

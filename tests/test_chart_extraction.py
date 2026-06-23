@@ -186,6 +186,21 @@ def test_looks_like_chart_text_separates_charts_from_prose():
     assert P._looks_like_chart_text("") is False
 
 
+def test_chart_render_scale_controls_resolution(tmp_path):
+    fitz = __import__("fitz")
+    pdf = tmp_path / "scale.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    page.draw_rect(fitz.Rect(20, 20, 180, 180), fill=(0.2, 0.4, 0.6))  # single region
+    doc.save(str(pdf))
+    doc.close()
+    proc = PDFProcessor()
+    small = proc.chart_region_images(str(pdf), 1, scale=1.0)[0]
+    large = proc.chart_region_images(str(pdf), 1, scale=3.0)[0]
+    assert fitz.Pixmap(small).width == 200      # 200 units * 1.0
+    assert fitz.Pixmap(large).width == 600      # 200 units * 3.0
+
+
 def test_chart_region_single_falls_back_to_whole_page(tmp_path):
     fitz = __import__("fitz")
     pdf = tmp_path / "onechart.pdf"
