@@ -79,11 +79,17 @@ services:
       # Let Docling OCR pages so TableFormer can recover tables from scanned PDFs
       # (memory-heavy — needs enough RAM; see OCR out-of-memory notes).
       - DOCLING_DO_OCR=true
+      # HuggingFace Hub: optional token for higher download rate limits (set
+      # HF_TOKEN in .env). HF_HOME points the model cache at a persistent volume
+      # so Docling/transformers models download once, not on every recreate.
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/root/.cache/huggingface
       - DEBUG=False
       - ENV=production
     volumes:
       - uploads_data:/app/static/uploads
       - paddlex_models:/root/.paddlex
+      - hf_cache:/root/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,6 +128,7 @@ volumes:
   redis_data:
   uploads_data:
   paddlex_models:
+  hf_cache:
 
 networks:
   chat-rag-network:
