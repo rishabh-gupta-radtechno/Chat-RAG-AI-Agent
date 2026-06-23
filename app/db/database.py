@@ -9,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
 
 settings = get_settings()
+logger = get_logger(__name__)
 
 # Create async engine
 engine = create_async_engine(
@@ -33,12 +35,20 @@ AsyncSessionLocal = sessionmaker(
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Dependency to get database session."""
-    async with AsyncSessionLocal() as session:
+    """Dependency to get database session.
+
+    Closing is guarded: if the underlying connection was dropped (e.g. during a
+    long request), close()/rollback can raise asyncpg "connection is closed".
+    That must not surface as an ASGI 500 during teardown, so swallow it.
+    """
+    session = AsyncSessionLocal()
+    try:
+        yield session
+    finally:
         try:
-            yield session
-        finally:
             await session.close()
+        except Exception as exc:  # dead connection on teardown — log, don't 500
+            logger.warning("Error closing DB session: %s", exc)
 
 
 async def create_all_tables():

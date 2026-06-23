@@ -146,9 +146,15 @@ async def delete_file(
 async def sync_embeddings(
     file_id: str,
     user_id = Depends(get_current_user_id),
-    session: AsyncSession = Depends(get_db),
 ):
-    """Sync embeddings for a file."""
+    """Sync embeddings for a file.
+
+    Document processing (OCR + Docling + chart vision) runs for minutes, far
+    longer than a DB connection stays alive. So this endpoint deliberately does
+    NOT take a request-scoped session (Depends(get_db)) — that session would
+    idle, get dropped, and then raise on teardown. Instead it opens short-lived
+    sessions only around the two quick DB touches, before and after the long step.
+    """
     try:
         from app.utils.helpers import validate_uuid
 
@@ -156,19 +162,16 @@ async def sync_embeddings(
         if not file_uuid:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file ID")
 
-        file_service = FileService(session)
-        file_obj = await file_service.get_file(file_uuid)
-        logger.info(f"file UUID: {file_uuid}, file object: {file_obj}")
-        if not file_obj or file_obj.uploaded_by != user_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+        # Short-lived session for the initial lookup; released before processing.
+        async with AsyncSessionLocal() as session:
+            file_obj = await FileService(session).get_file(file_uuid)
+            logger.info(f"file UUID: {file_uuid}, file object: {file_obj}")
+            if not file_obj or file_obj.uploaded_by != user_id:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+            filepath = file_obj.filepath
+            filename = file_obj.filename
 
-        # Capture fields before the long-running step below: document processing
-        # (OCR + Docling + vision) can run for minutes, during which the
-        # request-scoped DB connection is idle and may be dropped by the server.
-        filepath = file_obj.filepath
-        filename = file_obj.filename
-
-        # Process embeddings
+        # Process embeddings (long-running; no DB session held during this step).
         rag_pipeline = RAGPipeline()
         await rag_pipeline.initialize()
         await rag_pipeline.vector_db.delete_by_file_id(str(file_uuid))
@@ -179,12 +182,9 @@ async def sync_embeddings(
             user_id=user_id,
         )
 
-        # Mark file as embedded on a FRESH session — the request-scoped one above
-        # may have lost its connection during the long processing step (asyncpg
-        # "the underlying connection is closed"). A new session checks out a
-        # validated connection (pool_pre_ping).
-        async with AsyncSessionLocal() as fresh_session:
-            await FileService(fresh_session).mark_as_embedded(file_uuid)
+        # Fresh short-lived session for the final flag write.
+        async with AsyncSessionLocal() as session:
+            await FileService(session).mark_as_embedded(file_uuid)
 
         return SyncEmbeddingsResponse(
             file_id=file_uuid,
