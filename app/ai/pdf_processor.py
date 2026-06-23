@@ -213,11 +213,17 @@ class PDFProcessor:
             native_text, ocr_text = self._resolve_page_text(
                 raw_native_text, rendered_pages.get(page_number), page_images
             )
-            # Prefer Docling's structured tables (with captions + cell grid). Fall
-            # back to camelot/pdfplumber only for text-layer pages Docling missed.
-            # A table failure must never lose the page.
+            # Tables: Docling/TableFormer detects table REGIONS well (and ignores
+            # header/footer boxes), but on digital pages with ruled cells its ML
+            # cell-mapping can merge/shift columns. So on text-layer pages, refine
+            # each detected table's CONTENT with line-based extraction (pdfplumber/
+            # camelot read the actual grid lines). Fall back to line-based detection
+            # only when Docling found nothing. A table failure must never lose the page.
             tables = docling_tables.get(page_number, [])
-            if not tables and self._has_extractable_text_layer(raw_native_text):
+            has_text_layer = self._has_extractable_text_layer(raw_native_text)
+            if tables and has_text_layer:
+                tables = self._refine_tables_with_lines(filepath, page_number, tables)
+            elif not tables and has_text_layer:
                 try:
                     tables = self._extract_tables(filepath, page_number)
                 except Exception as exc:
@@ -308,6 +314,70 @@ class PDFProcessor:
         if tables_by_page:
             logger.info("Docling extracted tables on %d page(s)", len(tables_by_page))
         return tables_by_page
+
+    def _refine_tables_with_lines(
+        self, filepath: str, page_number: int, docling_tables: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Replace TableFormer cell content with line-based extraction where it matches.
+
+        On digital pages, pdfplumber/camelot read the actual ruled cell borders, so
+        they map columns far more accurately than TableFormer (which can merge a
+        serial number into the description and shift the rest). We only adopt a
+        line-based table when it matches a Docling-detected table by content, so the
+        header/footer boxes the line extractor tends to over-detect are never added.
+        """
+        try:
+            line_tables = self._extract_tables(filepath, page_number)
+        except Exception as exc:
+            logger.warning("Line-based table refine failed on page %s: %s", page_number, exc)
+            return docling_tables
+        if not line_tables:
+            return docling_tables
+
+        refined: List[Dict[str, Any]] = []
+        used: set = set()
+        for dt in docling_tables:
+            dt_tokens = self._table_tokens(dt)
+            best_index, best_score = None, 0.0
+            for index, lt in enumerate(line_tables):
+                if index in used:
+                    continue
+                score = self._token_overlap(dt_tokens, self._table_tokens(lt))
+                if score > best_score:
+                    best_index, best_score = index, score
+            # High overlap = same table, better columns -> adopt the line version.
+            if best_index is not None and best_score >= 0.5:
+                lt = line_tables[best_index]
+                used.add(best_index)
+                refined.append({
+                    "title": dt.get("title") or lt.get("title") or "Table",
+                    "header": lt.get("header", []),
+                    "rows": lt.get("rows", []),
+                    "markdown": "",  # regenerated downstream from header+rows
+                })
+                logger.info(
+                    "page=%s table refined via line-based extraction (overlap=%.2f)",
+                    page_number, best_score,
+                )
+            else:
+                refined.append(dt)  # no confident match: keep Docling's version
+        return refined
+
+    @staticmethod
+    def _table_tokens(table: Dict[str, Any]) -> set:
+        """Bag of alphanumeric tokens across a table's header + cells."""
+        parts: list = list(table.get("header") or [])
+        for row in table.get("rows") or []:
+            parts.extend(row)
+        text = " ".join(str(p) for p in parts).lower()
+        return set(re.findall(r"[a-z0-9/]+", text))
+
+    @staticmethod
+    def _token_overlap(a: set, b: set) -> float:
+        """Jaccard overlap of two token sets."""
+        if not a or not b:
+            return 0.0
+        return len(a & b) / len(a | b)
 
     def _extract_native_text_pages(self, filepath: str) -> list[str]:
         """Extract native text with pypdf, then fill weak pages with pdfplumber text."""

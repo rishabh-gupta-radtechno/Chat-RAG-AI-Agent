@@ -6,6 +6,54 @@ from app.ai.pdf_processor import PDFProcessor
 from app.ai.text_processor import TextProcessor
 
 
+# A TableFormer-style mangled dual-column part list (serial merged into description).
+_MANGLED_DOCLING = {
+    "title": "Table",
+    "header": ["Sl. No.", "Description", "Drg.No.", "Qty", "Sl. No.", "Description", "Drg.No.", "Qty"],
+    "rows": [
+        ["1 Housing S/A", "2KB758", "1", "14", "Spring Housing", "3KB761", "1", ""],
+        ["2*", "Filter", "4A68688", "1", "15", "Hex.Hd.Bolt M8x45", "IS:1363", "4"],
+    ],
+}
+# Clean line-based version of the same table (columns correctly split + spaced).
+_CLEAN_LINE = {
+    "title": "Table",
+    "header": ["Sl.No.", "Description", "Drg.No.", "Qty", "Sl.No.", "Description", "Drg.No.", "Qty"],
+    "rows": [
+        ["1", "Housing S/A", "2KB758", "1", "14", "Spring Housing", "3KB761", "1"],
+        ["2*", "Filter", "4A68688", "1", "15", "Hex. Hd. Bolt M8x45", "IS:1363", "4"],
+    ],
+}
+# Repeating header/footer box the line extractor over-detects; must NOT be adopted.
+_HEADER_BOX = {
+    "title": "Table",
+    "header": ["", "OPERATION AND MAINTENANCE MANUAL", ""],
+    "rows": [["", "PRESSURE REDUCING VALVE", "Rev.00"],
+             ["", "Doc. No. RED-RD-BS-014-OM-03-22", "Date:09/05/2022"]],
+}
+
+
+def test_refine_tables_adopts_line_based_and_skips_header_box(monkeypatch):
+    proc = PDFProcessor()
+    monkeypatch.setattr(proc, "_extract_tables", lambda fp, pg: [_HEADER_BOX, _CLEAN_LINE])
+    out = proc._refine_tables_with_lines("x.pdf", 9, [_MANGLED_DOCLING])
+    assert len(out) == 1
+    # Serial split out of the description (the bug the user reported).
+    assert out[0]["rows"][0][0] == "1"
+    assert out[0]["rows"][0][1] == "Housing S/A"
+    # The header box was never adopted.
+    flat = " ".join(c for r in out[0]["rows"] for c in r)
+    assert "MAINTENANCE MANUAL" not in flat
+
+
+def test_refine_tables_keeps_docling_when_no_line_match(monkeypatch):
+    proc = PDFProcessor()
+    # Only an unrelated header box available -> no confident match -> keep Docling.
+    monkeypatch.setattr(proc, "_extract_tables", lambda fp, pg: [_HEADER_BOX])
+    out = proc._refine_tables_with_lines("x.pdf", 9, [_MANGLED_DOCLING])
+    assert out == [_MANGLED_DOCLING]
+
+
 def test_table_only_page_not_dropped():
     """A page with a table but little prose must not disappear (the page-2 bug)."""
     tp = TextProcessor()
