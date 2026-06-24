@@ -54,6 +54,53 @@ def test_refine_tables_keeps_docling_when_no_line_match(monkeypatch):
     assert out == [_MANGLED_DOCLING]
 
 
+def test_validate_table_keeps_real_digital_table_in_prose():
+    """The Faiveley part-list bug: a clean wide table whose cells are also in the
+    page text layer must NOT be rejected by the page-similarity rule (Rule 4)."""
+    tp = TextProcessor()
+    table = {
+        "title": "Table",
+        "header": ["Sl. No.", "FTIL Part No.", "Qty/Set", "Description"],
+        "rows": [
+            ["1", "501 0020 00", "1", "C3W2 DV (Al)"],
+            ["2", "602 0013 00", "1", "Combined Sandwich Piece Assembly"],
+            ["3", "601 0011 00", "1", "Common Pipe Bracket Assembly"],
+            ["4", "604 0012 00", "1", "Control Reservoir - 6 ltrs"],
+            ["7", "780 2639 00", "1", "N-1 Reducing Valve with 24-A Double Check Valve"],
+        ],
+    }
+    # Page prose CONTAINS the table cells (Docling left the table in the text layer).
+    page_text = (
+        "8.0 LIST OF MAIN ITEMS ON AIR BRAKE SYSTEM FOR CONCOR WAGONS "
+        "Sl. No. FTIL Part No. Qty/Set Description "
+        "1 501 0020 00 1 C3W2 DV (Al) 2 602 0013 00 1 Combined Sandwich Piece Assembly "
+        "3 601 0011 00 1 Common Pipe Bracket Assembly 4 604 0012 00 1 Control Reservoir 6 ltrs "
+        "7 780 2639 00 1 N-1 Reducing Valve with 24-A Double Check Valve"
+    )
+    assert tp.validate_table(table, page_text) is True
+
+
+def test_validate_table_passes_short_value_two_column_table():
+    """A 2-column table of short discrete values (codes/counts) survives even when
+    its text is in the page prose."""
+    tp = TextProcessor()
+    table = {"header": ["Zonal Railway", "Count"],
+             "rows": [["SWR", "71"], ["ECoR", "40"], ["SECR", "123"]]}
+    page_text = "Zonal Railway Count SWR 71 ECoR 40 SECR 123 total removed for investigation"
+    assert tp.validate_table(table, page_text) is True
+
+
+def test_validate_table_still_rejects_prose_in_two_column_grid():
+    """Rule 4 still catches the real case: a paragraph chopped into a 2-column grid."""
+    tp = TextProcessor()
+    table = {"header": ["A", "B"],
+             "rows": [["the changeover valve inside", "the double check valve moves"],
+                      ["to apply the brake in", "proportion to the depletion caused"]]}
+    page_text = ("the changeover valve inside the double check valve moves to apply the "
+                 "brake in proportion to the depletion caused in the brake pipe pressure")
+    assert tp.validate_table(table, page_text) is False
+
+
 def test_table_chunk_carries_structured_json_metadata():
     """Tables persist header/rows as structured JSON metadata (parity with charts)."""
     tp = TextProcessor()

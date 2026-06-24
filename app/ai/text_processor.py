@@ -250,9 +250,15 @@ class TextProcessor:
         if avg_words > 10 or long_cells > 0.5 * len(cells):
             return False
 
-        # Rule 4 — page-text similarity: a table that merely reformats the page
-        # prose (so its text ~= the page text) is a false positive.
-        if page_text:
+        # Rule 4 — page-text similarity, but ONLY for prose-shaped tables.
+        # A digital table's cells are ALSO in the page's text layer, so high token
+        # overlap with the page is normal and must NOT be read as "reformatted
+        # prose" — otherwise genuine tables get rejected whenever Docling didn't
+        # carve them out of the prose (the Faiveley part-list bug). Restrict the
+        # check to the case it was meant for: a thin (<=2 column), wordy grid that
+        # is really a paragraph chopped into cells. Wide tables, and tables of
+        # short discrete values, are unambiguously tabular and skip this rule.
+        if page_text and ncols <= 2 and avg_words >= 3:
             table_text = " ".join(cells)
             if TextProcessor._token_set_ratio(page_text, table_text) >= settings.table_vs_text_similarity_threshold:
                 return False
