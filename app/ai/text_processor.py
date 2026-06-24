@@ -242,12 +242,15 @@ class TextProcessor:
         if single_char >= 2:
             return False
 
-        # Rule 3 — paragraph dominance: real table cells are short values, not
-        # prose. Reject when cells are mostly long sentences.
+        # Rule 3 — paragraph dominance: a paragraph forced into a grid shows up as
+        # cells that are mostly long sentences. But only a THIN grid (<=2 cols) is
+        # plausibly that; a wide (>=3 col) table legitimately has paragraph cells
+        # (e.g. a "component | reference | description" matrix), so we must not
+        # reject those. Rule 2 still guards the split-word artifact case.
         word_counts = [len(c.split()) for c in cells]
         avg_words = sum(word_counts) / len(word_counts)
         long_cells = sum(1 for w in word_counts if w >= 10)
-        if avg_words > 10 or long_cells > 0.5 * len(cells):
+        if ncols <= 2 and (avg_words > 10 or long_cells > 0.5 * len(cells)):
             return False
 
         # Rule 4 — page-text similarity, but ONLY for prose-shaped tables.

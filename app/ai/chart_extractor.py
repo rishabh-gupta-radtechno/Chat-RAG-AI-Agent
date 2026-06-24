@@ -60,6 +60,12 @@ class ChartExtractor:
         'return {"charts": []}.'
     )
 
+    # The chart extractor only owns real data charts. If the vision model reports
+    # anything else (most often "table", sometimes "other"), it's NOT a chart —
+    # the chart's flat {label, value} model can't represent a table and would
+    # collapse rows. Such pages belong to the table pipeline, so we drop them here.
+    _CHART_TYPES = {"pie", "bar", "line"}
+
     def __init__(self, llm_client: Any) -> None:
         self._llm = llm_client
 
@@ -77,9 +83,13 @@ class ChartExtractor:
         if not parsed or not parsed.get("is_chart"):
             return None
 
+        chart_type = str(parsed.get("chart_type") or "other").strip().lower()
+        if chart_type not in self._CHART_TYPES:
+            return None  # not a real chart (e.g. a table) -> table pipeline owns it
+
         data = parsed.get("data")
         return {
-            "chart_type": str(parsed.get("chart_type") or "other").strip().lower(),
+            "chart_type": chart_type,
             "title": str(parsed.get("title") or "").strip(),
             "structured_data": data if isinstance(data, list) else [],
             "summary": str(parsed.get("summary") or "").strip(),
@@ -113,9 +123,12 @@ class ChartExtractor:
         for chart in charts:
             if not isinstance(chart, dict) or chart.get("is_chart") is False:
                 continue
+            chart_type = str(chart.get("chart_type") or "other").strip().lower()
+            if chart_type not in self._CHART_TYPES:
+                continue  # tables / "other" belong to the table pipeline, not charts
             data = chart.get("data")
             record = {
-                "chart_type": str(chart.get("chart_type") or "other").strip().lower(),
+                "chart_type": chart_type,
                 "title": str(chart.get("title") or "").strip(),
                 "structured_data": data if isinstance(data, list) else [],
                 "summary": str(chart.get("summary") or "").strip(),

@@ -80,6 +80,29 @@ def test_validate_table_keeps_real_digital_table_in_prose():
     assert tp.validate_table(table, page_text) is True
 
 
+def test_validate_table_keeps_wide_table_with_paragraph_cells():
+    """A wide (>=3 col) table legitimately has paragraph cells (component/reference/
+    description matrix) and must not be rejected by paragraph-dominance (Rule 3)."""
+    tp = TextProcessor()
+    table = {
+        "header": ["SN", "Air Brake Component", "Reference Document", "Description"],
+        "rows": [
+            ["a)", "Distributor Valve",
+             "OEM Maintenance Manuals Escorts MM-AB/DV-KEO KBIPL GD21266 Greysham "
+             "C3W Catalogue C3W2 Catalogue FTRIL SD Technical Stone India",
+             "Comprehensive documents on maintenance and overhaul procedure of the "
+             "Distributor valve covering tools fixtures lubricants testing troubleshooting "
+             "spare parts kits and replacement procedures"],
+            ["b)", "Air Brake Hose Coupling",
+             "RDSO letter no MW.APB dated 23/25.11.24",
+             "Instructions to ensure that the TOP markings on the hose nipple and palm end "
+             "coupling head must be properly aligned during assembly and installation to "
+             "prevent torsion and uncoupling"],
+        ],
+    }
+    assert tp.validate_table(table, "") is True
+
+
 def test_validate_table_passes_short_value_two_column_table():
     """A 2-column table of short discrete values (codes/counts) survives even when
     its text is in the page prose."""

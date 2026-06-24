@@ -80,6 +80,24 @@ def test_analyze_many_accepts_single_object_and_rejects_non_chart():
     assert asyncio.run(ChartExtractor(_Boom()).analyze_many(b"x")) == []
 
 
+def test_chart_extractor_drops_non_chart_types():
+    """A 'table' (or 'other') returned by the vision model must NOT become a chart —
+    the chart's flat label/value model collapses tables; they belong to the table pipeline."""
+    reply = json.dumps({"charts": [
+        {"chart_type": "table", "title": "Part List",
+         "data": [{"label": "SN", "value": "a) b)"}], "summary": "a table"},
+        {"chart_type": "pie", "title": "Make Wise",
+         "data": [{"label": "ESCORTS", "value": "34%"}], "summary": "Escorts highest at 34%."},
+    ]})
+    recs = asyncio.run(ChartExtractor(_FakeVisionLLM(reply)).analyze_many(b"x"))
+    assert len(recs) == 1 and recs[0]["chart_type"] == "pie"
+
+    # The single-object path rejects a table too.
+    tbl = json.dumps({"is_chart": True, "chart_type": "table",
+                      "data": [{"label": "x", "value": "y"}], "summary": "s"})
+    assert asyncio.run(ChartExtractor(_FakeVisionLLM(tbl)).analyze(b"x")) is None
+
+
 def test_build_pdf_chunks_creates_linked_chart_chunks():
     tp = TextProcessor()
     pages = [{
