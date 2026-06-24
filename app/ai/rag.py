@@ -73,6 +73,8 @@ class RAGPipeline:
         try:
             if filepath.endswith(".pdf"):
                 page_documents = self.pdf_processor.extract_page_documents(filepath, file_id=str(file_id))
+                if settings.enable_vision_table_fallback:
+                    await self._refine_low_confidence_tables(filepath, page_documents)
                 if settings.enable_chart_extraction:
                     await self._extract_charts(filepath, page_documents, file_id)
                 chunks = self.text_processor.build_pdf_chunks(page_documents, filename)
@@ -448,6 +450,52 @@ class RAGPipeline:
         section_bonus = 1.0 if document.get("section_match") else 0.0
 
         return (semantic_score * 2.0) + lexical_score + content_bonus + section_bonus - page_type_penalty
+
+    async def _refine_low_confidence_tables(self, filepath: str, page_documents: list) -> None:
+        """Re-read only low-confidence tables with the local vision model (on-prem).
+
+        Rules-based extraction (Docling + pdfplumber/camelot) handles most tables,
+        but ragged/merged digital tables and scanned tables can come out mis-mapped.
+        For those — and only those — render the page and ask the local vision model
+        to extract the table as structured rows. Confidential pages never leave the
+        host. Best-effort and gated by enable_vision_table_fallback.
+        """
+        try:
+            from app.ai.table_extractor import TableExtractor
+        except Exception as exc:
+            logger.warning("Table extractor unavailable: %s", exc)
+            return
+
+        extractor = TableExtractor(self.llm_client)
+        for page in page_documents:
+            tables = page.get("tables") or []
+            if not tables:
+                continue
+            page_number = page.get("page_number")
+            # Scanned pages (text came from OCR, not a native layer) are exactly the
+            # case rules-based table mapping struggles with — treat their tables as
+            # low-confidence too.
+            page_is_ocr = (
+                not (page.get("native_text") or "").strip()
+                and bool((page.get("ocr_text") or "").strip())
+            )
+            flags = [
+                page_is_ocr or self.pdf_processor._table_is_low_confidence(t)
+                for t in tables
+            ]
+            if not any(flags):
+                continue
+            image = self.pdf_processor.render_page_png(filepath, page_number)
+            if not image:
+                continue
+            vision_tables = await extractor.analyze(image)
+            if not vision_tables:
+                continue
+            page["tables"] = self.pdf_processor._merge_vision_tables(tables, flags, vision_tables)
+            logger.info(
+                "page=%s low-confidence tables refined via vision (%d candidate(s))",
+                page_number, sum(1 for f in flags if f),
+            )
 
     async def _extract_charts(self, filepath: str, page_documents: list, file_id) -> None:
         """Run the local vision model on chart-candidate pages and attach charts.

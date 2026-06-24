@@ -54,6 +54,27 @@ def test_refine_tables_keeps_docling_when_no_line_match(monkeypatch):
     assert out == [_MANGLED_DOCLING]
 
 
+def test_table_chunk_carries_structured_json_metadata():
+    """Tables persist header/rows as structured JSON metadata (parity with charts)."""
+    tp = TextProcessor()
+    pages = [{
+        "page_number": 1, "native_text": "Specification overview " + "word " * 60, "ocr_text": "",
+        "tables": [{"title": "Spec", "header": ["Param", "Value"],
+                    "rows": [["Pressure", "5 ksc"], ["Capacity", "3 litres"]]}],
+        "diagrams": [],
+    }]
+    chunks = tp.build_pdf_chunks(pages, "f.pdf")
+    table_chunks = [c for c in chunks if c["metadata"].get("content_type") == "table"]
+    assert table_chunks, "table chunk missing"
+    meta = table_chunks[0]["metadata"]
+    assert meta["table_id"] == "table_1_1"
+    assert meta["table_header"] == ["Param", "Value"]
+    assert ["Pressure", "5 ksc"] in meta["table_rows"]
+    assert ["Capacity", "3 litres"] in meta["table_rows"]
+    # Embedded text stays markdown + key=value (not JSON).
+    assert "Param=Pressure" in table_chunks[0]["text"] or "| Pressure |" in table_chunks[0]["text"]
+
+
 def test_table_only_page_not_dropped():
     """A page with a table but little prose must not disappear (the page-2 bug)."""
     tp = TextProcessor()

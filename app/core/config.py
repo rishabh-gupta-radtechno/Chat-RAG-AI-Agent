@@ -93,7 +93,19 @@ class Settings(BaseSettings):
     # Chart extraction (pie/bar/line) via a LOCAL Ollama vision model. Off by
     # default — needs the vision model pulled and adds memory; keeps data on-prem.
     enable_chart_extraction: bool = True
+    # Local Ollama vision model used for BOTH charts and the table fallback. 32B
+    # reads dense labels/cells far better than 7B but needs much more memory
+    # (~20GB+); pull it first (`ollama pull qwen2.5vl:32b`). Drop to 7B if RAM-bound.
     chart_vision_model: str = "qwen2.5vl:7b"  # any Ollama vision model
+
+    # On-prem vision fallback for tables: re-read ONLY low-confidence tables
+    # (ragged/merged digital tables, or scanned pages) with the vision model.
+    # Verifiable rules-based tables are kept as-is. Off-load stays on the host.
+    enable_vision_table_fallback: bool = True
+    # A rules-extracted table is "low confidence" if this fraction of cells are
+    # empty, or this fraction of rows have an inconsistent column count.
+    table_low_conf_empty_frac: float = 0.25
+    table_low_conf_ragged_frac: float = 0.30
     # A page with at least this many vector drawing ops is a chart/figure candidate.
     # Kept low because a simple pie chart can be only ~2 drawing ops; other signals
     # (large raster, chart-like %/number text) also flag candidates.

@@ -700,8 +700,15 @@ class TextProcessor:
                         file_name,
                     )
                     continue
+                table_id = f"table_{page_number}_{table_index}"
                 table_title = self._table_title(table, fallback=f"Table {table_index}")
-                table_markdown = self.table_to_markdown(table.get("header", []), table.get("rows", []))
+                # Persist the structured grid (header + rows) alongside the markdown so
+                # any source (Docling / pdfplumber / vision) lands as queryable JSON —
+                # the table counterpart of charts' structured_data. The embedded TEXT
+                # stays markdown + key=value (better for retrieval); JSON is metadata only.
+                table_header = [str(h).strip() for h in table.get("header", [])]
+                table_rows = [[str(c).strip() for c in row] for row in (table.get("rows") or [])]
+                table_markdown = self.table_to_markdown(table_header, table_rows)
                 for part_index, chunk_text in enumerate(self.chunk_table_text(table), start=1):
                     _add_chunk(
                         chunk_text,
@@ -711,8 +718,11 @@ class TextProcessor:
                             "document_page_number": document_page_number,
                             "content_type": "table",
                             "page_type": page_type,
+                            "table_id": table_id,
                             "table_title": table_title,
                             "table_markdown": table_markdown,
+                            "table_header": table_header,
+                            "table_rows": table_rows,
                             "chunk_id": f"{file_name}|page{page_number}|table|{table_index:03d}.{part_index:02d}",
                         },
                     )

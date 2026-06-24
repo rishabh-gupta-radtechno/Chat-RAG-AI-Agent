@@ -364,6 +364,80 @@ class PDFProcessor:
         return refined
 
     @staticmethod
+    def _table_is_low_confidence(table: Dict[str, Any]) -> bool:
+        """Heuristic: does a rules-extracted table look mis-mapped?
+
+        Flags ragged rows (inconsistent column counts) or a high fraction of empty
+        cells — the signatures of TableFormer merging/shifting columns. Uniform,
+        well-filled tables (incl. simple 2-column ones) are left alone. Does not
+        catch the scanned row-shift case (uniform but shifted); the caller treats
+        OCR-sourced pages as low-confidence separately.
+        """
+        rows = table.get("rows") or []
+        if not rows:
+            return False
+        header = table.get("header") or []
+        ncols = len(header) if header else max((len(r) for r in rows), default=0)
+        if ncols <= 1:
+            return False  # single-column or empty: nothing to misalign
+
+        total = ncols * len(rows)
+        empty = 0
+        ragged = 0
+        for row in rows:
+            if len(row) != ncols:
+                ragged += 1
+            for i in range(ncols):
+                if i >= len(row) or not str(row[i]).strip():
+                    empty += 1
+        empty_frac = empty / total if total else 0.0
+        ragged_frac = ragged / len(rows)
+        return (
+            empty_frac >= settings.table_low_conf_empty_frac
+            or ragged_frac >= settings.table_low_conf_ragged_frac
+        )
+
+    @classmethod
+    def _merge_vision_tables(
+        cls,
+        original_tables: List[Dict[str, Any]],
+        low_conf_flags: List[bool],
+        vision_tables: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Replace each low-confidence table with its best token-matching vision table.
+
+        High-confidence (rules-based) tables are kept untouched — they are verifiable.
+        A low-confidence table is only replaced when a vision table matches it by
+        content (token overlap), so vision output is anchored to a real detected table.
+        """
+        merged: List[Dict[str, Any]] = []
+        used: set = set()
+        for table, is_low in zip(original_tables, low_conf_flags):
+            if not is_low:
+                merged.append(table)
+                continue
+            tokens = cls._table_tokens(table)
+            best_index, best_score = None, 0.0
+            for index, vt in enumerate(vision_tables):
+                if index in used:
+                    continue
+                score = cls._token_overlap(tokens, cls._table_tokens(vt))
+                if score > best_score:
+                    best_index, best_score = index, score
+            if best_index is not None and best_score >= 0.3:
+                vt = vision_tables[best_index]
+                used.add(best_index)
+                merged.append({
+                    "title": table.get("title") or vt.get("title") or "Table",
+                    "header": vt.get("header", []),
+                    "rows": vt.get("rows", []),
+                    "markdown": "",  # regenerated downstream from header+rows
+                })
+            else:
+                merged.append(table)  # no confident vision match: keep rules-based
+        return merged
+
+    @staticmethod
     def _table_tokens(table: Dict[str, Any]) -> set:
         """Bag of alphanumeric tokens across a table's header + cells."""
         parts: list = list(table.get("header") or [])
