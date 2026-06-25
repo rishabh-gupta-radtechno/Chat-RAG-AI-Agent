@@ -54,6 +54,42 @@ def test_refine_tables_keeps_docling_when_no_line_match(monkeypatch):
     assert out == [_MANGLED_DOCLING]
 
 
+def test_two_column_page_read_in_column_order(tmp_path):
+    """A two-column page must be read left-column-then-right, not line-interleaved."""
+    fitz = __import__("fitz")
+    pdf = tmp_path / "twocol.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=400)
+    page.insert_textbox(fitz.Rect(50, 30, 550, 55), "SECTION HEADER ACROSS PAGE")  # full width
+    for y, txt in [(80, "Left alpha first"), (140, "Left beta second"), (200, "Left gamma third")]:
+        page.insert_textbox(fitz.Rect(50, y, 280, y + 40), txt)        # left column
+    for y, txt in [(80, "Right one value"), (140, "Right two value"), (200, "Right three value")]:
+        page.insert_textbox(fitz.Rect(320, y, 550, y + 40), txt)       # right column
+    doc.save(str(pdf))
+    doc.close()
+
+    text = PDFProcessor()._extract_text_columns(str(pdf), 1)
+    assert text is not None, "two-column page not detected"
+    positions = [text.index(s) for s in
+                 ["SECTION HEADER", "Left alpha", "Left gamma", "Right one", "Right three"]]
+    # header first, then the whole left column, then the whole right column
+    assert positions == sorted(positions), f"wrong reading order: {text!r}"
+
+
+def test_single_column_page_left_untouched(tmp_path):
+    """A single-column page must NOT be treated as multi-column (returns None)."""
+    fitz = __import__("fitz")
+    pdf = tmp_path / "onecol.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=400)
+    for i, y in enumerate([60, 120, 180, 240, 300]):
+        page.insert_textbox(fitz.Rect(50, y, 550, y + 40),
+                            f"Full width paragraph number {i} spanning the entire page width here.")
+    doc.save(str(pdf))
+    doc.close()
+    assert PDFProcessor()._extract_text_columns(str(pdf), 1) is None
+
+
 def test_validate_table_keeps_real_digital_table_in_prose():
     """The Faiveley part-list bug: a clean wide table whose cells are also in the
     page text layer must NOT be rejected by the page-similarity rule (Rule 4)."""

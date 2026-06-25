@@ -209,6 +209,14 @@ class PDFProcessor:
         pages: list[Dict[str, Any]] = []
         for page_number in range(1, page_count + 1):
             raw_native_text = "\n".join(pages_text.get(page_number, []))
+            # Two-column digital pages can be read as one full-width flow (columns
+            # interleaved line by line). If this page has a real text layer laid out
+            # in columns, re-read it in column order. No-op for single-column and
+            # scanned pages, so existing extraction is unchanged for them.
+            column_text = self._extract_text_columns(filepath, page_number)
+            if column_text:
+                raw_native_text = column_text
+                logger.info("page=%s text reading-order corrected (two-column layout)", page_number)
             page_images = images_by_page.get(page_number, [])
             native_text, ocr_text = self._resolve_page_text(
                 raw_native_text, rendered_pages.get(page_number), page_images
@@ -527,6 +535,100 @@ class PDFProcessor:
             logger.warning("Unable to render pages for OCR: %s", exc)
 
         return rendered_pages
+
+    def _extract_text_columns(self, filepath: str, page_number: int) -> Optional[str]:
+        """Reading-order text for a TWO-COLUMN digital page — else None.
+
+        Docling/full-page-OCR can read a two-column page as one full-width flow,
+        interleaving the columns line by line (left procedure text spliced with
+        right-column values). When a page has a real text layer split by a clear
+        vertical gutter, re-read it column by column (band-aware so full-width
+        headings stay in place). Returns None for single-column pages, scanned
+        pages (no text blocks), or anything ambiguous — so existing behavior is
+        unchanged for everything except genuine multi-column pages.
+        """
+        try:
+            import fitz
+        except ImportError:
+            return None
+        try:
+            with fitz.open(filepath) as document:
+                if not (1 <= page_number <= len(document)):
+                    return None
+                page = document[page_number - 1]
+                blocks = [
+                    b for b in page.get_text("blocks")
+                    if len(b) >= 7 and b[6] == 0 and str(b[4]).strip()
+                ]
+                if len(blocks) < 6:
+                    return None  # too little text to reliably call it multi-column
+                width = page.rect.width or 1.0
+                split = self._detect_column_split(blocks, width)
+                if split is None:
+                    return None
+                return self._order_two_columns(blocks, split)
+        except Exception as exc:
+            logger.debug("Column text extraction failed on page %s: %s", page_number, exc)
+            return None
+
+    @staticmethod
+    def _detect_column_split(blocks: list, width: float) -> Optional[float]:
+        """Find a vertical gutter that cleanly splits blocks into two columns.
+
+        Tries candidate x-positions across the page middle and picks the one with
+        the fewest blocks straddling it. Single-column text spans the full width,
+        so every interior split straddles almost all blocks -> rejected (None).
+        """
+        n = len(blocks)
+        best_split, best_cross = None, None
+        for pct in range(35, 66):  # 0.35 .. 0.65 of page width
+            split = width * pct / 100.0
+            left = sum(1 for b in blocks if b[2] <= split)
+            right = sum(1 for b in blocks if b[0] >= split)
+            crossing = n - left - right
+            # Both columns must carry real content, and few blocks may straddle
+            # the gutter (only full-width headings/footers should).
+            if left >= 3 and right >= 3 and crossing <= 0.25 * n:
+                if best_cross is None or crossing < best_cross:
+                    best_split, best_cross = split, crossing
+        return best_split
+
+    @staticmethod
+    def _order_two_columns(blocks: list, split: float) -> str:
+        """Emit blocks in column reading order, band by band.
+
+        Full-width blocks (straddling the gutter — headings, footers) act as band
+        separators and are emitted in place; within each band the left column is
+        emitted top-to-bottom, then the right column top-to-bottom.
+        """
+        def kind(b):
+            if b[0] < split < b[2]:
+                return "full"
+            return "left" if b[2] <= split else "right"
+
+        out: list = []
+        band_left: list = []
+        band_right: list = []
+
+        def flush():
+            for b in sorted(band_left, key=lambda b: b[1]):
+                out.append(b[4])
+            for b in sorted(band_right, key=lambda b: b[1]):
+                out.append(b[4])
+            band_left.clear()
+            band_right.clear()
+
+        for b in sorted(blocks, key=lambda b: (round(b[1], 1), b[0])):
+            k = kind(b)
+            if k == "full":
+                flush()
+                out.append(b[4])
+            elif k == "left":
+                band_left.append(b)
+            else:
+                band_right.append(b)
+        flush()
+        return "\n".join(s.strip() for s in out if s and s.strip())
 
     def render_page_png(self, filepath: str, page_number: int, scale: Optional[float] = None) -> Optional[bytes]:
         """Render a single page to PNG bytes (for vision/chart analysis)."""

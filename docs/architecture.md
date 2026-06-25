@@ -56,6 +56,13 @@ Section-aware chunking, not naive fixed windows: heading-bounded and page-bounde
 segments, running header/footer removal, and mojibake repair. Each chunk carries
 `section_number` / `section_title` for section-scoped retrieval and citation.
 
+**Two-column reading order:** a multi-column digital page can otherwise be read as one
+full-width flow (columns interleaved line by line). `_extract_text_columns` detects a
+clear vertical gutter from the text-block bounding boxes and re-reads the page column by
+column (band-aware, so full-width headings stay in place). It activates **only** for
+pages with a real text layer that are clearly two-column — single-column and scanned
+pages fall through to the normal Docling/OCR text unchanged.
+
 ### 3. Tables → structured chunks
 Docling/TableFormer **detects** table regions (and correctly ignores header/footer
 boxes). On **digital** pages with ruled cells, TableFormer's ML cell-mapping can merge
