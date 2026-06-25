@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     # Local Ollama vision model used for BOTH charts and the table fallback. 32B
     # reads dense labels/cells far better than 7B but needs much more memory
     # (~20GB+); pull it first (`ollama pull qwen2.5vl:32b`). Drop to 7B if RAM-bound.
-    chart_vision_model: str = "qwen2.5vl:7b"  # any Ollama vision model
+    chart_vision_model: str = "qwen2.5vl:32b"  # any Ollama vision model
 
     # On-prem vision fallback for tables: re-read ONLY low-confidence tables
     # (ragged/merged digital tables, or scanned pages) with the vision model.

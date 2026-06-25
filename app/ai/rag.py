@@ -483,19 +483,20 @@ class RAGPipeline:
                 page_is_ocr or self.pdf_processor._table_is_low_confidence(t)
                 for t in tables
             ]
-            if not any(flags):
+            n_low = sum(1 for f in flags if f)
+            if not n_low:
                 continue
+            logger.info("page=%s: %d low-confidence table(s); rendering for vision fallback", page_number, n_low)
             image = self.pdf_processor.render_page_png(filepath, page_number)
             if not image:
+                logger.warning("page=%s: render failed; vision table fallback skipped", page_number)
                 continue
             vision_tables = await extractor.analyze(image)
+            logger.info("page=%s: vision table fallback returned %d table(s)", page_number, len(vision_tables))
             if not vision_tables:
                 continue
             page["tables"] = self.pdf_processor._merge_vision_tables(tables, flags, vision_tables)
-            logger.info(
-                "page=%s low-confidence tables refined via vision (%d candidate(s))",
-                page_number, sum(1 for f in flags if f),
-            )
+            logger.info("page=%s: low-confidence tables refined via vision", page_number)
 
     async def _extract_charts(self, filepath: str, page_documents: list, file_id) -> None:
         """Run the local vision model on chart-candidate pages and attach charts.
