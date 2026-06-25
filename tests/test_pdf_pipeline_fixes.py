@@ -76,6 +76,34 @@ def test_two_column_page_read_in_column_order(tmp_path):
     assert positions == sorted(positions), f"wrong reading order: {text!r}"
 
 
+def test_three_column_page_read_in_column_order(tmp_path):
+    """Three columns must be read col1 -> col2 -> col3 (top-to-bottom each)."""
+    fitz = __import__("fitz")
+    pdf = tmp_path / "threecol.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=400)
+    # A genuinely full-width header: long enough to actually span the page (a short
+    # string renders narrow and would not be a real full-width block).
+    page.insert_textbox(
+        fitz.Rect(40, 25, 560, 60),
+        "HEADER SPANNING ALL THREE COLUMNS ACROSS THE ENTIRE FULL WIDTH OF THIS WIDE TEST PAGE LAYOUT",
+    )
+    columns = {
+        "C1": (40, 190), "C2": (220, 380), "C3": (410, 560),
+    }
+    for tag, (x0, x1) in columns.items():
+        for y, label in [(80, "alpha"), (140, "beta"), (200, "gamma")]:
+            page.insert_textbox(fitz.Rect(x0, y, x1, y + 40), f"{tag} {label}")
+    doc.save(str(pdf))
+    doc.close()
+
+    text = PDFProcessor()._extract_text_columns(str(pdf), 1)
+    assert text is not None, "three-column page not detected"
+    order = [text.index(s) for s in
+             ["HEADER", "C1 alpha", "C1 gamma", "C2 alpha", "C2 gamma", "C3 alpha", "C3 gamma"]]
+    assert order == sorted(order), f"wrong reading order: {text!r}"
+
+
 def test_single_column_page_left_untouched(tmp_path):
     """A single-column page must NOT be treated as multi-column (returns None)."""
     fitz = __import__("fitz")

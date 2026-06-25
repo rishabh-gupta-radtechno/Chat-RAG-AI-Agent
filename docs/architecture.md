@@ -56,12 +56,13 @@ Section-aware chunking, not naive fixed windows: heading-bounded and page-bounde
 segments, running header/footer removal, and mojibake repair. Each chunk carries
 `section_number` / `section_title` for section-scoped retrieval and citation.
 
-**Two-column reading order:** a multi-column digital page can otherwise be read as one
-full-width flow (columns interleaved line by line). `_extract_text_columns` detects a
-clear vertical gutter from the text-block bounding boxes and re-reads the page column by
-column (band-aware, so full-width headings stay in place). It activates **only** for
-pages with a real text layer that are clearly two-column — single-column and scanned
-pages fall through to the normal Docling/OCR text unchanged.
+**Multi-column reading order (N columns):** a multi-column digital page can otherwise be
+read as one full-width flow (columns interleaved line by line). `_extract_text_columns`
+projects the text-block bounding boxes onto the x-axis, finds the vertical whitespace
+gutters (`_detect_column_bands` — works for 2, 3, 4+ columns), and re-reads the page
+column by column (`_order_columns`, band-aware so full-width headings stay in place). It
+activates **only** for pages with a real text layer split into clear columns —
+single-column and scanned pages fall through to the normal Docling/OCR text unchanged.
 
 ### 3. Tables → structured chunks
 Docling/TableFormer **detects** table regions (and correctly ignores header/footer

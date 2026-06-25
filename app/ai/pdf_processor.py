@@ -209,14 +209,14 @@ class PDFProcessor:
         pages: list[Dict[str, Any]] = []
         for page_number in range(1, page_count + 1):
             raw_native_text = "\n".join(pages_text.get(page_number, []))
-            # Two-column digital pages can be read as one full-width flow (columns
+            # Multi-column digital pages can be read as one full-width flow (columns
             # interleaved line by line). If this page has a real text layer laid out
             # in columns, re-read it in column order. No-op for single-column and
             # scanned pages, so existing extraction is unchanged for them.
             column_text = self._extract_text_columns(filepath, page_number)
             if column_text:
                 raw_native_text = column_text
-                logger.info("page=%s text reading-order corrected (two-column layout)", page_number)
+                logger.info("page=%s text reading-order corrected (multi-column layout)", page_number)
             page_images = images_by_page.get(page_number, [])
             native_text, ocr_text = self._resolve_page_text(
                 raw_native_text, rendered_pages.get(page_number), page_images
@@ -537,12 +537,12 @@ class PDFProcessor:
         return rendered_pages
 
     def _extract_text_columns(self, filepath: str, page_number: int) -> Optional[str]:
-        """Reading-order text for a TWO-COLUMN digital page — else None.
+        """Reading-order text for a MULTI-COLUMN digital page (2, 3, 4+) — else None.
 
-        Docling/full-page-OCR can read a two-column page as one full-width flow,
+        Docling/full-page-OCR can read a multi-column page as one full-width flow,
         interleaving the columns line by line (left procedure text spliced with
-        right-column values). When a page has a real text layer split by a clear
-        vertical gutter, re-read it column by column (band-aware so full-width
+        right-column values). When a page has a real text layer split by clear
+        vertical gutters, re-read it column by column (band-aware so full-width
         headings stay in place). Returns None for single-column pages, scanned
         pages (no text blocks), or anything ambiguous — so existing behavior is
         unchanged for everything except genuine multi-column pages.
@@ -563,70 +563,100 @@ class PDFProcessor:
                 if len(blocks) < 6:
                     return None  # too little text to reliably call it multi-column
                 width = page.rect.width or 1.0
-                split = self._detect_column_split(blocks, width)
-                if split is None:
+                cols = self._detect_column_bands(blocks, width)
+                if not cols or len(cols) < 2:
                     return None
-                return self._order_two_columns(blocks, split)
+                return self._order_columns(blocks, cols)
         except Exception as exc:
             logger.debug("Column text extraction failed on page %s: %s", page_number, exc)
             return None
 
     @staticmethod
-    def _detect_column_split(blocks: list, width: float) -> Optional[float]:
-        """Find a vertical gutter that cleanly splits blocks into two columns.
+    def _detect_column_bands(blocks: list, width: float) -> Optional[list]:
+        """Detect N column x-ranges from vertical whitespace gutters.
 
-        Tries candidate x-positions across the page middle and picks the one with
-        the fewest blocks straddling it. Single-column text spans the full width,
-        so every interior split straddles almost all blocks -> rejected (None).
+        Projects the narrow (non-full-width) text blocks onto the x-axis; the
+        gaps between inked regions are the gutters, and the inked runs between
+        them are the columns. Works for 2, 3, 4+ columns. Single-column pages
+        have body blocks spanning the full text width (so they're treated as
+        full-width and excluded), leaving no inked runs -> returns None.
         """
-        n = len(blocks)
-        best_split, best_cross = None, None
-        for pct in range(35, 66):  # 0.35 .. 0.65 of page width
-            split = width * pct / 100.0
-            left = sum(1 for b in blocks if b[2] <= split)
-            right = sum(1 for b in blocks if b[0] >= split)
-            crossing = n - left - right
-            # Both columns must carry real content, and few blocks may straddle
-            # the gutter (only full-width headings/footers should).
-            if left >= 3 and right >= 3 and crossing <= 0.25 * n:
-                if best_cross is None or crossing < best_cross:
-                    best_split, best_cross = split, crossing
-        return best_split
+        bins = 100
+        bin_w = (width / bins) or 1.0
+        # Exclude full-width blocks (headings/footers, and single-column body text
+        # that spans the whole text measure) so they can't mask the gutters.
+        wide_limit = 0.65 * width
+        ink = [False] * bins
+        for b in blocks:
+            if (b[2] - b[0]) > wide_limit:
+                continue
+            lo = max(0, min(bins - 1, int(b[0] / bin_w)))
+            hi = max(0, min(bins - 1, int(b[2] / bin_w)))
+            for i in range(lo, hi + 1):
+                ink[i] = True
+        if not any(ink):
+            return None
+
+        first = ink.index(True)
+        last = bins - 1 - ink[::-1].index(True)
+        min_gutter = max(1, int(0.02 * bins))   # ignore tiny inter-word gaps
+        min_col_w = 0.08 * width                 # ignore slivers / margin noise
+
+        cols: list = []
+        seg_start = first
+        i = first
+        while i <= last:
+            if not ink[i]:
+                j = i
+                while j <= last and not ink[j]:
+                    j += 1
+                if (j - i) >= min_gutter:        # a real gutter closes a column
+                    cols.append((seg_start * bin_w, i * bin_w))
+                    seg_start = j
+                i = j
+            else:
+                i += 1
+        cols.append((seg_start * bin_w, (last + 1) * bin_w))
+
+        cols = [(a, c) for (a, c) in cols if (c - a) >= min_col_w]
+        return cols if len(cols) >= 2 else None
 
     @staticmethod
-    def _order_two_columns(blocks: list, split: float) -> str:
-        """Emit blocks in column reading order, band by band.
+    def _order_columns(blocks: list, cols: list) -> str:
+        """Emit blocks in column reading order, band by band, for N columns.
 
-        Full-width blocks (straddling the gutter — headings, footers) act as band
-        separators and are emitted in place; within each band the left column is
-        emitted top-to-bottom, then the right column top-to-bottom.
+        A block that meaningfully overlaps two or more column ranges (a full-width
+        heading/footer) acts as a band separator and is emitted in place; within
+        each band the columns are emitted left-to-right, each top-to-bottom.
         """
-        def kind(b):
-            if b[0] < split < b[2]:
-                return "full"
-            return "left" if b[2] <= split else "right"
+        def assign(b):
+            overlaps = [
+                k for k, (a, c) in enumerate(cols)
+                if (min(b[2], c) - max(b[0], a)) > 0.3 * (c - a)
+            ]
+            if len(overlaps) >= 2:
+                return None  # spans multiple columns -> full-width separator
+            if overlaps:
+                return overlaps[0]
+            cx = (b[0] + b[2]) / 2
+            return min(range(len(cols)), key=lambda k: abs(cx - (cols[k][0] + cols[k][1]) / 2))
 
         out: list = []
-        band_left: list = []
-        band_right: list = []
+        bands: list = [[] for _ in cols]
 
         def flush():
-            for b in sorted(band_left, key=lambda b: b[1]):
-                out.append(b[4])
-            for b in sorted(band_right, key=lambda b: b[1]):
-                out.append(b[4])
-            band_left.clear()
-            band_right.clear()
+            for col in bands:
+                for b in sorted(col, key=lambda b: b[1]):
+                    out.append(b[4])
+                col.clear()
 
         for b in sorted(blocks, key=lambda b: (round(b[1], 1), b[0])):
-            k = kind(b)
-            if k == "full":
+            k = assign(b)
+            if k is None:
                 flush()
                 out.append(b[4])
-            elif k == "left":
-                band_left.append(b)
             else:
-                band_right.append(b)
+                bands[k].append(b)
         flush()
         return "\n".join(s.strip() for s in out if s and s.strip())
 
