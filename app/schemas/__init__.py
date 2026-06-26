@@ -2,7 +2,7 @@
 Pydantic schemas for request/response validation.
 """
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -133,7 +133,10 @@ class DiagramReference(BaseModel):
     file_id: UUID
     page_number: Optional[int] = None
     document_page_number: Optional[int] = None
-    image_index: Optional[int] = None
+    # image_index is an ordinal int for raster images extracted via get_images(),
+    # but a label string for vision-extracted figures/charts ("figure1", "chart1")
+    # and full-page scanned-image pointers ("page"). Accept both.
+    image_index: Optional[Union[int, str]] = None
     description: str
     image_url: Optional[str] = None
     relevance_score: float = 0.0
