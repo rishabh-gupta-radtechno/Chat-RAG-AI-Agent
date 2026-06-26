@@ -85,21 +85,30 @@ Every table chunk also persists the structured grid as JSON metadata — `table_
 counterpart of charts' `structured_data`. The embedded *text* stays Markdown + key=value
 (better for retrieval); the JSON is metadata for exact lookups and UI rendering.
 
-### 4. Charts → vision extraction (NOT OCR)
-Charts are **not** OCR'd. Candidate pages are detected by any of: enough vector drawing
-ops, a large raster image, or chart-like OCR text (many %/number labels). Each candidate
-is region-split (a page may hold several charts side by side) and sent to a **local
-Qwen2.5-VL** model via Ollama, which returns structured JSON + a human summary. Each chart
-produces three linked chunks sharing a `related_chart` id: `chart_data` (structured),
-`chart_summary` (prose, embedded for retrieval), and `chart_image` (rendered PNG pointer).
-`analyze_many` also splits multiple charts out of a single flattened image.
+### 4. Figures → one local vision call (charts AND diagrams)
+Candidate pages are detected by any of: enough vector drawing ops, a large raster image,
+or chart-like OCR text (many %/number labels). Each candidate is region-split (a page may
+hold several figures side by side) and each region goes through **one** local Qwen2.5-VL
+call (`ChartExtractor.analyze_region`) that **classifies and reads it** — a region is a
+chart **XOR** a diagram:
 
-### 5. Diagrams → OCR (+ optional caption)
-Embedded images above a coverage threshold are treated as real diagrams: extracted with
+- **Chart** (pie/bar/line) → structured JSON + a human summary. Produces three linked
+  chunks sharing a `related_chart` id: `chart_data` (structured), `chart_summary` (prose,
+  embedded for retrieval), and `chart_image` (rendered PNG pointer). Handles multiple
+  charts in one flattened image.
+- **Diagram / schematic** (a labelled drawing/cutaway/flow diagram — often a **vector**
+  figure that `get_images()` can't see) → the rendered region is saved and the vision
+  model writes a **description** of what it shows; emitted as a `diagram` chunk (the
+  description is what makes the figure retrievable). This is why vector engineering
+  diagrams are captured at all — `get_images` only sees raster.
+- **Table / plain text** → neither (the table/text pipelines own it).
+
+### 5. Raster diagrams → OCR (+ optional caption)
+Separately, embedded **raster** images above a coverage threshold are extracted with
 PyMuPDF, de-duplicated by hash, OCR'd with PaddleOCR, and optionally captioned with **BLIP**
-(`enable_diagram_captioning`, default **off**). Note: Qwen2.5-VL is used for **charts**, not
-diagrams. Diagram images may be stored as their own chunk or linked to the nearest text
-chunk via `related_images`.
+(`enable_diagram_captioning`, default **off**). The vision figure pass (stage 4) skips a
+page that already has a raster diagram, so the same figure isn't captured twice. Diagram
+images may be their own chunk or linked to the nearest text chunk via `related_images`.
 
 ### 6. Deduplication
 Three stages: exact/fuzzy text (normalized hash + token-Jaccard), diagram-containment

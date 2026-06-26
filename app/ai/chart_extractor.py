@@ -66,8 +66,44 @@ class ChartExtractor:
     # collapse rows. Such pages belong to the table pipeline, so we drop them here.
     _CHART_TYPES = {"pie", "bar", "line"}
 
+    PROMPT_FIGURE = (
+        "You are analysing ONE image: a region of a technical document page. "
+        "Classify it into exactly one kind and respond with ONLY valid JSON "
+        "(no prose, no markdown fences).\n"
+        "1) A DATA CHART (pie, bar, or line graph):\n"
+        '   {"kind": "chart", "charts": [{"chart_type": "pie|bar|line", '
+        '"title": "<title or empty>", '
+        '"data": [{"label": "<category>", "value": "<number or percentage>"}], '
+        '"summary": "<one or two sentences naming the dominant values>"}]}\n   '
+        + _DATA_RULES +
+        "2) An ENGINEERING DIAGRAM / SCHEMATIC / FIGURE (a labelled drawing, cutaway, "
+        "assembly, flow or circuit diagram — NOT a data chart):\n"
+        '   {"kind": "diagram", "title": "<figure title or empty>", '
+        '"description": "<2 to 4 sentences describing what the figure shows: its main '
+        'components and how they connect or function>"}\n'
+        "3) Mainly a table, plain text, or nothing visual:\n"
+        '   {"kind": "none"}'
+    )
+
     def __init__(self, llm_client: Any) -> None:
         self._llm = llm_client
+
+    @classmethod
+    def _normalize_chart(cls, chart: Any) -> Optional[Dict[str, Any]]:
+        """Normalize one model chart object, or None if it isn't a real chart."""
+        if not isinstance(chart, dict) or chart.get("is_chart") is False:
+            return None
+        chart_type = str(chart.get("chart_type") or "other").strip().lower()
+        if chart_type not in cls._CHART_TYPES:
+            return None  # tables / "other" belong to other pipelines, not charts
+        data = chart.get("data")
+        record = {
+            "chart_type": chart_type,
+            "title": str(chart.get("title") or "").strip(),
+            "structured_data": data if isinstance(data, list) else [],
+            "summary": str(chart.get("summary") or "").strip(),
+        }
+        return record if (record["structured_data"] or record["summary"]) else None
 
     async def analyze(self, image_bytes: bytes) -> Optional[Dict[str, Any]]:
         """Return a chart record, or None if the image is not a chart / on error."""
@@ -82,18 +118,7 @@ class ChartExtractor:
         parsed = self._parse_json(raw)
         if not parsed or not parsed.get("is_chart"):
             return None
-
-        chart_type = str(parsed.get("chart_type") or "other").strip().lower()
-        if chart_type not in self._CHART_TYPES:
-            return None  # not a real chart (e.g. a table) -> table pipeline owns it
-
-        data = parsed.get("data")
-        return {
-            "chart_type": chart_type,
-            "title": str(parsed.get("title") or "").strip(),
-            "structured_data": data if isinstance(data, list) else [],
-            "summary": str(parsed.get("summary") or "").strip(),
-        }
+        return self._normalize_chart(parsed)
 
     async def analyze_many(self, image_bytes: bytes) -> List[Dict[str, Any]]:
         """Return every chart in the image (handles multiple charts on one page).
@@ -121,22 +146,45 @@ class ChartExtractor:
 
         records: List[Dict[str, Any]] = []
         for chart in charts:
-            if not isinstance(chart, dict) or chart.get("is_chart") is False:
-                continue
-            chart_type = str(chart.get("chart_type") or "other").strip().lower()
-            if chart_type not in self._CHART_TYPES:
-                continue  # tables / "other" belong to the table pipeline, not charts
-            data = chart.get("data")
-            record = {
-                "chart_type": chart_type,
-                "title": str(chart.get("title") or "").strip(),
-                "structured_data": data if isinstance(data, list) else [],
-                "summary": str(chart.get("summary") or "").strip(),
-            }
-            # Skip empty shells (no data and no summary).
-            if record["structured_data"] or record["summary"]:
+            record = self._normalize_chart(chart)
+            if record:
                 records.append(record)
         return records
+
+    async def analyze_region(self, image_bytes: bytes) -> Dict[str, Any]:
+        """Classify and read one figure region in a SINGLE vision call.
+
+        Returns ``{"charts": [...records...], "diagram": {"title","description"}|None}``.
+        A data chart yields structured chart records; an engineering diagram/schematic
+        yields a written description (far more useful for retrieval than a generic
+        caption); tables/plain text yield neither. A region is a chart XOR a diagram.
+        """
+        result: Dict[str, Any] = {"charts": [], "diagram": None}
+        if not image_bytes:
+            return result
+        try:
+            raw = await self._llm.vision(self.PROMPT_FIGURE, image_bytes)
+        except Exception as exc:  # vision failure must never abort ingestion
+            logger.warning("Figure vision call failed: %s", exc)
+            return result
+
+        parsed = self._parse_json(raw)
+        if not parsed:
+            return result
+
+        for chart in parsed.get("charts") or []:
+            record = self._normalize_chart(chart)
+            if record:
+                result["charts"].append(record)
+
+        if not result["charts"]:
+            description = str(parsed.get("description") or "").strip()
+            if str(parsed.get("kind") or "").strip().lower() == "diagram" and description:
+                result["diagram"] = {
+                    "title": str(parsed.get("title") or "").strip(),
+                    "description": description,
+                }
+        return result
 
     @staticmethod
     def _parse_json(raw: str) -> Optional[Dict[str, Any]]:

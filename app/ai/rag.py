@@ -76,7 +76,7 @@ class RAGPipeline:
                 if settings.enable_vision_table_fallback:
                     await self._refine_low_confidence_tables(filepath, page_documents)
                 if settings.enable_chart_extraction:
-                    await self._extract_charts(filepath, page_documents, file_id)
+                    await self._extract_figures(filepath, page_documents, file_id)
                 chunks = self.text_processor.build_pdf_chunks(page_documents, filename)
                 # Stages 1 & 2: exact + diagram/fuzzy dedup before embedding.
                 chunks = self.text_processor.deduplicate_chunks(chunks)
@@ -498,16 +498,20 @@ class RAGPipeline:
             page["tables"] = self.pdf_processor._merge_vision_tables(tables, flags, vision_tables)
             logger.info("page=%s: low-confidence tables refined via vision", page_number)
 
-    async def _extract_charts(self, filepath: str, page_documents: list, file_id) -> None:
-        """Run the local vision model on chart-candidate pages and attach charts.
+    async def _extract_figures(self, filepath: str, page_documents: list, file_id) -> None:
+        """Vision-analyse figure regions on candidate pages (charts AND diagrams).
 
-        Best-effort and gated by enable_chart_extraction: any failure is logged
-        and skipped so chart analysis never blocks document ingestion.
+        One local vision call per region classifies and reads it: a data chart ->
+        structured chart records; an engineering diagram/schematic (often a VECTOR
+        drawing that get_images() can't see) -> a saved image + a written
+        description. A region is a chart XOR a diagram. Best-effort and gated by
+        enable_chart_extraction; any failure is logged and skipped so it never
+        blocks ingestion. Fully on-prem.
         """
         try:
             from app.ai.chart_extractor import ChartExtractor
         except Exception as exc:
-            logger.warning("Chart extractor unavailable: %s", exc)
+            logger.warning("Figure extractor unavailable: %s", exc)
             return
 
         # Geometry pre-pass over the PDF (vector drawings / raster / native text).
@@ -524,29 +528,50 @@ class RAGPipeline:
             if page_number not in candidates and not text_is_chart_like:
                 continue
             if page_number not in candidates:
-                logger.info("page=%s chart-candidate (ocr_chart_like_text)", page_number)
-            # One image per chart region (a page may hold several side-by-side).
+                logger.info("page=%s figure-candidate (ocr_chart_like_text)", page_number)
+            # If a raster diagram was already captured for this page, don't also save
+            # a vision diagram for the same figure (avoid duplicate images).
+            had_raster_diagram = bool(page.get("diagrams"))
+            # One image per region (a page may hold several figures side-by-side).
             region_images = self.pdf_processor.chart_region_images(filepath, page_number)
             for region_index, image in enumerate(region_images, start=1):
                 if not image:
                     continue
-                # analyze_many handles >1 chart in a single (e.g. flattened) image.
-                charts = await extractor.analyze_many(image)
-                if not charts:
+                result = await extractor.analyze_region(image)
+                charts = result.get("charts") or []
+                if charts:
+                    image_url = self.pdf_processor._save_diagram_image(
+                        file_id=str(file_id), page_number=page_number,
+                        image_index=f"chart{region_index}", image_bytes=image,
+                    )
+                    for chart in charts:
+                        chart["image_url"] = image_url
+                        page.setdefault("charts", []).append(chart)
+                        logger.info(
+                            "page=%s region=%s chart extracted type=%s points=%s",
+                            page_number, region_index, chart.get("chart_type"),
+                            len(chart.get("structured_data", [])),
+                        )
                     continue
-                image_url = self.pdf_processor._save_diagram_image(
-                    file_id=str(file_id),
-                    page_number=page_number,
-                    image_index=f"chart{region_index}",
-                    image_bytes=image,
-                )
-                for chart in charts:
-                    chart["image_url"] = image_url
-                    page.setdefault("charts", []).append(chart)
+                diagram = result.get("diagram")
+                if diagram and not had_raster_diagram:
+                    image_url = self.pdf_processor._save_diagram_image(
+                        file_id=str(file_id), page_number=page_number,
+                        image_index=f"figure{region_index}", image_bytes=image,
+                    )
+                    try:
+                        labels = (self.pdf_processor._run_ocr(image) or "").strip()
+                    except Exception:
+                        labels = ""
+                    page.setdefault("diagrams", []).append({
+                        "image_index": f"figure{region_index}",
+                        "description": diagram.get("description", ""),
+                        "ocr_text": labels,
+                        "image_url": image_url,
+                    })
                     logger.info(
-                        "page=%s region=%s chart extracted type=%s points=%s",
-                        page_number, region_index, chart.get("chart_type"),
-                        len(chart.get("structured_data", [])),
+                        "page=%s region=%s diagram captured via vision description",
+                        page_number, region_index,
                     )
 
     @staticmethod

@@ -98,6 +98,35 @@ def test_chart_extractor_drops_non_chart_types():
     assert asyncio.run(ChartExtractor(_FakeVisionLLM(tbl)).analyze(b"x")) is None
 
 
+def test_analyze_region_routes_chart_diagram_and_none():
+    """One vision call classifies a region: chart -> data, diagram -> description, else nothing."""
+    chart_reply = json.dumps({"kind": "chart", "charts": [
+        {"chart_type": "pie", "title": "Make Wise",
+         "data": [{"label": "ESCORTS", "value": "34%"}], "summary": "Escorts highest at 34%."}]})
+    r = asyncio.run(ChartExtractor(_FakeVisionLLM(chart_reply)).analyze_region(b"x"))
+    assert len(r["charts"]) == 1 and r["charts"][0]["chart_type"] == "pie"
+    assert r["diagram"] is None
+
+    diagram_reply = json.dumps({"kind": "diagram", "title": "P4ag valve",
+        "description": "Cutaway of the P4ag distributor valve showing the charging path "
+                       "through the initial charging valve and control reservoir."})
+    r = asyncio.run(ChartExtractor(_FakeVisionLLM(diagram_reply)).analyze_region(b"x"))
+    assert r["charts"] == []
+    assert r["diagram"] and "Cutaway" in r["diagram"]["description"]
+    assert r["diagram"]["title"] == "P4ag valve"
+
+    none_reply = json.dumps({"kind": "none"})
+    r = asyncio.run(ChartExtractor(_FakeVisionLLM(none_reply)).analyze_region(b"x"))
+    assert r["charts"] == [] and r["diagram"] is None
+
+    # A region the model calls a chart but whose only "chart" is actually a table
+    # must not leak into either bucket as a chart.
+    tableish = json.dumps({"kind": "chart", "charts": [
+        {"chart_type": "table", "title": "T", "data": [{"label": "a", "value": "b"}], "summary": "x"}]})
+    r = asyncio.run(ChartExtractor(_FakeVisionLLM(tableish)).analyze_region(b"x"))
+    assert r["charts"] == []
+
+
 def test_build_pdf_chunks_creates_linked_chart_chunks():
     tp = TextProcessor()
     pages = [{
