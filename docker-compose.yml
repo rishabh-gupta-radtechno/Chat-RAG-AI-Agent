@@ -73,7 +73,11 @@ services:
       - OLLAMA_EMBEDDING_MODEL=bge-m3
       - OLLAMA_TIMEOUT_SECONDS=600
       - OLLAMA_NUM_CTX=4096
-      - OLLAMA_NUM_PREDICT=-1
+      # Cap response length so a reasoning model can't run unbounded on CPU and
+      # hit the timeout (-1 = unbounded).
+      - OLLAMA_NUM_PREDICT=1024
+      # Disable qwen3's hidden <think> reasoning for much faster CPU answers.
+      - OLLAMA_THINK=false
       # Hardware acceleration: auto (use GPU when present, else CPU), cpu, or cuda.
       # Safe on CPU-only hosts — the default CPU torch build makes "auto" resolve
       # to CPU. GPU passthrough is added by docker-compose.gpu.yml.

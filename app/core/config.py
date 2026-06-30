@@ -48,7 +48,14 @@ class Settings(BaseSettings):
     ollama_embeddings_path: str = "/api/embeddings"
     ollama_timeout_seconds: int = 120
     ollama_num_ctx: int = 4096  # must be larger than the largest prompt sent
-    ollama_num_predict: int = -1
+    # Cap response length. -1 = unbounded, which on CPU lets a reasoning model run
+    # for thousands of tokens and blow past the request timeout; bound it instead.
+    ollama_num_predict: int = 1024
+    # qwen3 / deepseek-r1 etc. emit a hidden <think> reasoning block before the
+    # answer — slow on CPU. False disables it for much faster RAG answers (the
+    # visible answer is unchanged). Only set True for a thinking model when you
+    # actually want the reasoning, and never for a non-thinking model.
+    ollama_think: bool = False
 
     # File Upload
     upload_dir: str = "static/uploads"

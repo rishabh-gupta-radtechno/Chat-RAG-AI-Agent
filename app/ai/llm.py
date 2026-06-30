@@ -84,6 +84,9 @@ class OllamaClient:
                 json={
                     "model": self.model,
                     "messages": messages,
+                    # Disable hidden reasoning for thinking models (qwen3) — a big
+                    # speedup on CPU; the visible answer is unchanged.
+                    "think": settings.ollama_think,
                     "options": {
                         "temperature": temperature,
                         "top_p": top_p,
