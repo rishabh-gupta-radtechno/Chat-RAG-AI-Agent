@@ -2,6 +2,7 @@
 RAG (Retrieval-Augmented Generation) pipeline.
 """
 
+import asyncio
 import math
 import re
 import uuid
@@ -72,14 +73,24 @@ class RAGPipeline:
         """Process and embed a document."""
         try:
             if filepath.endswith(".pdf"):
-                page_documents = self.pdf_processor.extract_page_documents(filepath, file_id=str(file_id))
+                # The extraction pipeline (Docling, PaddleOCR, OpenCV, PyMuPDF) is
+                # synchronous and CPU-bound. Run it in a worker thread so it never
+                # blocks the API event loop — these native libraries release the
+                # GIL during their heavy work, so health checks and chat stay
+                # responsive while a document ingests. Caller serializes ingestion
+                # with a semaphore so this can't run for many docs at once.
+                page_documents = await asyncio.to_thread(
+                    self.pdf_processor.extract_page_documents, filepath, file_id=str(file_id)
+                )
                 if settings.enable_vision_table_fallback:
                     await self._refine_low_confidence_tables(filepath, page_documents)
                 if settings.enable_chart_extraction:
                     await self._extract_figures(filepath, page_documents, file_id)
-                chunks = self.text_processor.build_pdf_chunks(page_documents, filename)
+                chunks = await asyncio.to_thread(
+                    self.text_processor.build_pdf_chunks, page_documents, filename
+                )
                 # Stages 1 & 2: exact + diagram/fuzzy dedup before embedding.
-                chunks = self.text_processor.deduplicate_chunks(chunks)
+                chunks = await asyncio.to_thread(self.text_processor.deduplicate_chunks, chunks)
                 logger.info(
                     "Extracted PDF page data for %s pages and created %s chunks",
                     len(page_documents),
@@ -143,7 +154,8 @@ class RAGPipeline:
                     continue
 
             # Stage 3: drop near-identical chunks by embedding cosine similarity.
-            vectors = self._dedup_by_embedding(vectors)
+            # O(n^2) numpy pass — run off the event loop.
+            vectors = await asyncio.to_thread(self._dedup_by_embedding, vectors)
 
             if vectors:
                 await self.vector_db.upsert_vectors(vectors)
@@ -487,7 +499,7 @@ class RAGPipeline:
             if not n_low:
                 continue
             logger.info("page=%s: %d low-confidence table(s); rendering for vision fallback", page_number, n_low)
-            image = self.pdf_processor.render_page_png(filepath, page_number)
+            image = await asyncio.to_thread(self.pdf_processor.render_page_png, filepath, page_number)
             if not image:
                 logger.warning("page=%s: render failed; vision table fallback skipped", page_number)
                 continue
@@ -515,7 +527,7 @@ class RAGPipeline:
             return
 
         # Geometry pre-pass over the PDF (vector drawings / raster / native text).
-        candidates = self.pdf_processor.chart_candidate_pages(filepath)
+        candidates = await asyncio.to_thread(self.pdf_processor.chart_candidate_pages, filepath)
         extractor = ChartExtractor(self.llm_client)
         for page in page_documents:
             page_number = page.get("page_number")
@@ -533,7 +545,9 @@ class RAGPipeline:
             # a vision diagram for the same figure (avoid duplicate images).
             had_raster_diagram = bool(page.get("diagrams"))
             # One image per region (a page may hold several figures side-by-side).
-            region_images = self.pdf_processor.chart_region_images(filepath, page_number)
+            region_images = await asyncio.to_thread(
+                self.pdf_processor.chart_region_images, filepath, page_number
+            )
             for region_index, image in enumerate(region_images, start=1):
                 if not image:
                     continue
@@ -560,7 +574,7 @@ class RAGPipeline:
                         image_index=f"figure{region_index}", image_bytes=image,
                     )
                     try:
-                        labels = (self.pdf_processor._run_ocr(image) or "").strip()
+                        labels = (await asyncio.to_thread(self.pdf_processor._run_ocr, image) or "").strip()
                     except Exception:
                         labels = ""
                     page.setdefault("diagrams", []).append({

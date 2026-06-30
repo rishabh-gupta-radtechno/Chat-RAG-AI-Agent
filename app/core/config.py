@@ -126,6 +126,22 @@ class Settings(BaseSettings):
     embedding_model_local: str = "paraphrase-multilingual-mpnet-base-v2"
     use_local_embeddings: bool = False
 
+    # CPU / concurrency control
+    # Cap native thread pools (OpenMP/BLAS/OpenCV/Paddle/torch) so a single
+    # ingestion can't fan out across every core and starve the API event loop.
+    # The same value is exported as OMP_NUM_THREADS etc. before numpy/torch are
+    # imported (app/main.py + docker-compose) — those env vars are the real lever;
+    # this setting drives the runtime cv2.setNumThreads cap.
+    # Default 3 is tuned for the 4-vCPU dev box (Hostinger KVM4, 16 GB): leaves
+    # one core free for the health check + Ollama (which ingestion calls for
+    # embeddings/vision). Raise it only on a host with more cores to spare.
+    ingestion_max_threads: int = 3
+    # Max document ingestions processed at once. The CPU-bound ingestion stages
+    # run off the event loop in worker threads; this semaphore bounds how many
+    # run concurrently so a burst of uploads can't saturate the VPS. Kept at 1 on
+    # the 4-vCPU box so two Docling pipelines can't oversubscribe cores/RAM.
+    ingestion_max_concurrency: int = 1
+
     # RAG
     vector_search_top_k: int = 5
     similarity_threshold: float = 0.5

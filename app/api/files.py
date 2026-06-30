@@ -1,6 +1,7 @@
 """
 File upload and management API routes.
 """
+import asyncio
 from datetime import datetime
 
 from typing import List
@@ -22,6 +23,12 @@ from app.core.logging import get_logger
 router = APIRouter(prefix="/files", tags=["Files"])
 logger = get_logger(__name__)
 settings = get_settings()
+
+# Serialize the CPU-heavy ingestion pipeline. Its extraction/OCR stages run in
+# worker threads (see RAGPipeline.process_document); this bounds how many
+# documents ingest at once so a burst of uploads can't saturate the VPS. One
+# instance shared across all requests in this worker process.
+_INGESTION_SEMAPHORE = asyncio.Semaphore(settings.ingestion_max_concurrency)
 
 
 @router.post("/upload", response_model=FileUploadResponse, status_code=status.HTTP_201_CREATED)
@@ -172,15 +179,17 @@ async def sync_embeddings(
             filename = file_obj.filename
 
         # Process embeddings (long-running; no DB session held during this step).
+        # Serialized so concurrent syncs don't all run extraction/OCR at once.
         rag_pipeline = RAGPipeline()
         await rag_pipeline.initialize()
-        await rag_pipeline.vector_db.delete_by_file_id(str(file_uuid))
-        chunks_created = await rag_pipeline.process_document(
-            filepath=filepath,
-            file_id=file_uuid,
-            filename=filename,
-            user_id=user_id,
-        )
+        async with _INGESTION_SEMAPHORE:
+            await rag_pipeline.vector_db.delete_by_file_id(str(file_uuid))
+            chunks_created = await rag_pipeline.process_document(
+                filepath=filepath,
+                file_id=file_uuid,
+                filename=filename,
+                user_id=user_id,
+            )
 
         # Fresh short-lived session for the final flag write.
         async with AsyncSessionLocal() as session:

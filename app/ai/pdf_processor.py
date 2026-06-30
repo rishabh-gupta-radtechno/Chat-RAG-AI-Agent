@@ -29,6 +29,28 @@ _MIN_EMBEDDED_IMAGE_SIDE = 50
 
 _TESSERACT_LANG_MAP = {"en": "eng", "hi": "hin", "ch": "chi_sim"}
 
+_CV2_THREADS_LIMITED = False
+
+
+def _limit_cv2_threads() -> None:
+    """Cap OpenCV's internal thread pool once per process.
+
+    OpenCV runs its own thread pool and ignores OMP_NUM_THREADS, so deskew/resize
+    on a large scan would otherwise fan out across every core. Idempotent and
+    best-effort; only affects parallelism, never the pixel output.
+    """
+    global _CV2_THREADS_LIMITED
+    if _CV2_THREADS_LIMITED:
+        return
+    try:
+        import cv2
+
+        cv2.setNumThreads(max(1, settings.ingestion_max_threads))
+    except Exception:
+        pass
+    finally:
+        _CV2_THREADS_LIMITED = True
+
 
 class PDFProcessor:
     """Extract page-level multimodal data from PDF documents."""
@@ -1150,6 +1172,7 @@ class PDFProcessor:
             import cv2
             import numpy as np
 
+            _limit_cv2_threads()
             array = np.frombuffer(image_bytes, dtype=np.uint8)
             image = cv2.imdecode(array, cv2.IMREAD_COLOR)
             if image is None:
@@ -1167,6 +1190,7 @@ class PDFProcessor:
             import numpy as np
             from PIL import Image
 
+            _limit_cv2_threads()
             array = np.frombuffer(image_bytes, dtype=np.uint8)
             image = cv2.imdecode(array, cv2.IMREAD_COLOR)
             if image is None:

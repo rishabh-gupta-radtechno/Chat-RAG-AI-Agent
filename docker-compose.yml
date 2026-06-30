@@ -84,6 +84,20 @@ services:
       # so Docling/transformers models download once, not on every recreate.
       - HF_TOKEN=${HF_TOKEN:-}
       - HF_HOME=/root/.cache/huggingface
+      # Cap native thread pools so one document ingestion can't fan out across
+      # every core and starve the API/health endpoints. Set before the process
+      # starts so numpy/torch/OpenCV/Paddle pick them up at import. Tuned for the
+      # 4-vCPU / 16 GB dev box (Hostinger KVM4): 3 leaves one core free for the
+      # health check + Ollama (which ingestion calls for embeddings/vision).
+      # Tune via the single INGESTION_MAX_THREADS knob; raise on a bigger host.
+      - INGESTION_MAX_THREADS=3
+      - INGESTION_MAX_CONCURRENCY=1
+      - OMP_NUM_THREADS=3
+      - OPENBLAS_NUM_THREADS=3
+      - MKL_NUM_THREADS=3
+      - NUMEXPR_NUM_THREADS=3
+      - VECLIB_MAXIMUM_THREADS=3
+      - OPENCV_NUM_THREADS=3
       - DEBUG=False
       - ENV=production
     volumes:

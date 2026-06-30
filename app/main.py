@@ -2,6 +2,25 @@
 Main FastAPI application.
 """
 
+# Cap native thread pools BEFORE numpy / torch / OpenCV / Paddle are imported
+# anywhere — those libraries read these env vars at import time, so setting them
+# later has no effect. Without this, a single document ingestion fans out across
+# every core (each lib defaults to all cores) and pegs the VPS, blocking health
+# checks until the container is restarted. Values mirror
+# settings.ingestion_max_threads; override the whole set via INGESTION_MAX_THREADS.
+import os as _os
+
+_INGESTION_THREADS = _os.environ.get("INGESTION_MAX_THREADS", "2")
+for _thread_var in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "OPENCV_NUM_THREADS",
+):
+    _os.environ.setdefault(_thread_var, _INGESTION_THREADS)
+
 import logging
 from contextlib import asynccontextmanager
 
