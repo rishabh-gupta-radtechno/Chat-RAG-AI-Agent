@@ -74,6 +74,10 @@ services:
       - OLLAMA_TIMEOUT_SECONDS=600
       - OLLAMA_NUM_CTX=4096
       - OLLAMA_NUM_PREDICT=-1
+      # Hardware acceleration: auto (use GPU when present, else CPU), cpu, or cuda.
+      # Safe on CPU-only hosts — the default CPU torch build makes "auto" resolve
+      # to CPU. GPU passthrough is added by docker-compose.gpu.yml.
+      - DEVICE=${DEVICE:-auto}
       - RAG_CONTEXT_DOCS=6
       - RAG_CONTEXT_MAX_CHARS=8000
       # Let Docling OCR pages so TableFormer can recover tables from scanned PDFs

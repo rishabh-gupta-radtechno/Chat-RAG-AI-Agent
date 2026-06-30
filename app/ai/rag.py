@@ -56,7 +56,10 @@ class RAGPipeline:
         """Initialize cross-encoder reranker."""
         try:
             from sentence_transformers import CrossEncoder
-            self._reranker = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
+            from app.core.device import torch_device
+            self._reranker = CrossEncoder(
+                'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', device=torch_device()
+            )
             logger.info("Reranking enabled")
         except ImportError:
             logger.warning("sentence-transformers not installed, reranking disabled")
@@ -664,7 +667,8 @@ class RAGPipeline:
         """Generate embeddings using local sentence-transformers model."""
         try:
             from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer(settings.embedding_model_local)
+            from app.core.device import torch_device
+            model = SentenceTransformer(settings.embedding_model_local, device=torch_device())
             embedding = model.encode(text)
             return embedding.tolist()
         except ImportError:

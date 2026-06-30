@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     debug: bool = False
     env: str = "development"
 
+    # Hardware acceleration. "auto" uses CUDA when it is actually available, else
+    # CPU; "cpu" forces CPU even on a GPU host; "cuda" prefers GPU but falls back
+    # to CPU (with a warning) if none is found. Default keeps CPU-only hosts working.
+    device: str = "auto"  # auto | cpu | cuda
+
     # Database
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/chat_rag_db"
     sync_database_url: str = "postgresql://postgres:postgres@localhost:5432/chat_rag_db"

@@ -161,6 +161,29 @@ class PDFProcessor:
             except Exception as exc:
                 logger.debug("Could not set TableFormer ACCURATE mode: %s", exc)
 
+        # Run Docling's models (layout, TableFormer, OCR) on the GPU when one is
+        # available; otherwise CPU. The accelerator classes moved modules across
+        # Docling versions, so try both import paths. Best-effort: any failure
+        # here just leaves Docling on its default device.
+        try:
+            from app.core.device import use_cuda
+
+            try:
+                from docling.datamodel.accelerator_options import (
+                    AcceleratorDevice,
+                    AcceleratorOptions,
+                )
+            except ImportError:
+                from docling.datamodel.pipeline_options import (  # type: ignore
+                    AcceleratorDevice,
+                    AcceleratorOptions,
+                )
+
+            accel_device = AcceleratorDevice.CUDA if use_cuda() else AcceleratorDevice.CPU
+            pipeline_options.accelerator_options = AcceleratorOptions(device=accel_device)
+        except Exception as exc:
+            logger.debug("Could not set Docling accelerator device: %s", exc)
+
         doc_converter = DocumentConverter(
             allowed_formats=[InputFormat.PDF],
             format_options={
@@ -1044,8 +1067,13 @@ class PDFProcessor:
     def _create_paddle_ocr(paddle_ocr_cls: Any) -> Any:
         import paddleocr as paddleocr_module
 
+        from app.core.device import paddle_use_gpu
+
         lang = settings.ocr_lang or "en"
         version = getattr(paddleocr_module, "__version__", "3")
+        # Only True when the paddlepaddle-gpu build is installed AND a device is
+        # visible; the default CPU paddle build keeps this False, so OCR stays on CPU.
+        on_gpu = paddle_use_gpu()
 
         if version.startswith("2."):
             # PaddleOCR 2.x API. det_limit_side_len matters: the default (960)
@@ -1053,7 +1081,7 @@ class PDFProcessor:
             return paddle_ocr_cls(
                 use_angle_cls=True,
                 lang=lang,
-                use_gpu=False,
+                use_gpu=on_gpu,
                 use_space_char=True,
                 show_log=False,
                 det_limit_side_len=_MAX_OCR_SIDE,
@@ -1069,7 +1097,7 @@ class PDFProcessor:
             # in _prepare_image_for_paddle and these scans are flat, so those two
             # extra networks only add per-image latency (and a first-run download)
             # without improving accuracy.
-            return paddle_ocr_cls(
+            kwargs = dict(
                 lang=lang,
                 use_textline_orientation=True,
                 use_doc_orientation_classify=False,
@@ -1078,6 +1106,11 @@ class PDFProcessor:
                 text_det_limit_side_len=_MAX_OCR_SIDE,
                 text_det_limit_type="max",
             )
+            if on_gpu:
+                # PaddleOCR 3.x selects hardware via `device`; "gpu" requires the
+                # paddlepaddle-gpu build (the CPU build never reaches here).
+                kwargs["device"] = "gpu"
+            return paddle_ocr_cls(**kwargs)
         except (TypeError, ValueError):
             return paddle_ocr_cls(lang=lang, use_textline_orientation=True)
 
@@ -1430,9 +1463,14 @@ class PDFProcessor:
             )
             return "A diagram or figure image with structural layout."
 
+        from app.core.device import torch_device
+
+        device = torch_device()
         if self._caption_model is None or self._caption_processor is None:
             self._caption_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
-            self._caption_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large")
+            self._caption_model = BlipForConditionalGeneration.from_pretrained(
+                "Salesforce/blip-image-captioning-large"
+            ).to(device)
 
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -1441,6 +1479,7 @@ class PDFProcessor:
             captions = []
             for prompt in prompts:
                 pixel_values = self._caption_processor(images=image, text=prompt, return_tensors="pt").pixel_values
+                pixel_values = pixel_values.to(device)
                 with torch.no_grad():
                     generated_ids = self._caption_model.generate(pixel_values, max_new_tokens=50)
                 caption = self._caption_processor.decode(generated_ids[0], skip_special_tokens=True)

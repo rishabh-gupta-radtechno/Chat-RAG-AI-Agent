@@ -1,0 +1,40 @@
+# GPU override — layer this on top of docker-compose.yml on hosts that have an
+# NVIDIA GPU AND the NVIDIA Container Toolkit installed:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#
+# The base docker-compose.yml stays CPU-only and runs anywhere; this file is
+# purely additive (extra device reservations + a CUDA torch build for the API).
+services:
+  # Ollama runs the chat / embedding / vision models. It auto-detects the GPU
+  # once a device is reserved — no app or env change needed. This is the biggest
+  # win (chat, embeddings, and the vision model all move to the GPU).
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Rebuild the API image against a CUDA torch wheel and expose the GPU to the
+  # container so Docling/TableFormer (and the optional transformers models) use
+  # it. DEVICE=auto from the base file then resolves to CUDA at runtime.
+  #
+  # NOTE: PaddleOCR stays on CPU here — requirements.txt ships the CPU paddle
+  # build, so paddle_use_gpu() stays False. To move OCR to the GPU too, install
+  # paddlepaddle-gpu (matching the CUDA version below) in the image.
+  api:
+    build:
+      args:
+        # Match this to the host's CUDA/driver. cu124 works with recent drivers;
+        # use cu121 / cu126 etc. if that's what the host supports.
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu124
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

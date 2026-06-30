@@ -17,8 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 
+# torch wheel index. CPU-only by default so the image builds and runs on any host.
+# For a GPU image, override at build time with a CUDA index matching the host
+# driver, e.g.:
+#   docker build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124 .
+# (docker-compose.gpu.yml sets this for you.)
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+
 RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision \
+    && pip install --no-cache-dir --index-url ${TORCH_INDEX_URL} torch torchvision \
     && pip install --no-cache-dir -r requirements.txt
 
 # Runtime stage
