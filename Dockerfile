@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Build stage
 FROM python:3.11-slim as builder
 
@@ -24,9 +25,20 @@ COPY requirements.txt .
 # (docker-compose.gpu.yml sets this for you.)
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir --index-url ${TORCH_INDEX_URL} torch torchvision \
-    && pip install --no-cache-dir -r requirements.txt
+# Split into separate layers so a network drop only re-runs the failed step
+# (torch stays cached once it succeeds). The pip cache mount keeps downloaded
+# wheels across builds/retries — it lives in a BuildKit cache volume, NOT in the
+# image, so this does not grow the final image. --retries/--timeout ride out the
+# flaky link instead of aborting the whole build.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip setuptools wheel
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 10 --timeout 120 \
+    --index-url ${TORCH_INDEX_URL} torch torchvision
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 10 --timeout 120 -r requirements.txt
 
 # Runtime stage
 FROM python:3.11-slim
