@@ -114,6 +114,13 @@ class Settings(BaseSettings):
     # (ragged/merged digital tables, or scanned pages) with the vision model.
     # Verifiable rules-based tables are kept as-is. Off-load stays on the host.
     enable_vision_table_fallback: bool = True
+    # Circuit breaker: after this many consecutive vision-model failures within one
+    # document, stop calling the vision model for the rest of that document (it's
+    # down / OOM). Prevents a broken model from wasting minutes per page.
+    vision_max_consecutive_failures: int = 2
+    # Per-call timeout (seconds) for a single vision request, so one hung call can't
+    # block ingestion. Generous — a large model on CPU is slow; a GPU host is fast.
+    vision_timeout_seconds: int = 300
     # A rules-extracted table is "low confidence" if this fraction of cells are
     # empty, or this fraction of rows have an inconsistent column count.
     table_low_conf_empty_frac: float = 0.25

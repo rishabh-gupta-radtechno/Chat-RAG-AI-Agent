@@ -34,6 +34,13 @@ paddleocr>=3.1
 camelot-py
 pdfplumber
 docling
+# Enables Docling's RapidOCR (ONNX backend). Without it Docling's OCR engine
+# fails to initialize ("rapidocr cannot be used because onnxruntime is not
+# installed" -> "Unsupported configuration: torch.PP-OCRv6.det.small"), which
+# forced Docling to fall back to traditional extraction.
+# used plain onnxruntime (CPU build) — correct for this CPU host. 
+# If you later move to a GPU box and want ONNX on GPU, that'd be onnxruntime-gpu instead (don't install both).
+onnxruntime
 
 # Improved embeddings and retrieval
 sentence-transformers

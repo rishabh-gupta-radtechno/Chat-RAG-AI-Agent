@@ -23,6 +23,9 @@ class OllamaClient:
         self.embedding_model = settings.ollama_embedding_model
         self.vision_model = settings.chart_vision_model
         self.embeddings_path = settings.ollama_embeddings_path
+        # Circuit breaker for the vision model (reset per document / client).
+        self._vision_failures = 0
+        self._vision_disabled = False
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(
                 settings.ollama_timeout_seconds,
@@ -33,30 +36,60 @@ class OllamaClient:
             )
         )
 
+    def reset_vision_breaker(self) -> None:
+        """Re-enable the vision model (call at the start of each document)."""
+        self._vision_failures = 0
+        self._vision_disabled = False
+
     async def vision(self, prompt: str, image_bytes: bytes, temperature: float = 0.0) -> str:
         """Run a local Ollama vision model on an image and return its text reply.
 
-        Used for chart understanding (kept on-prem so confidential pages never
-        leave the host). Image is sent base64-encoded per the Ollama /api/generate
-        ``images`` field.
+        Used for chart/diagram understanding (kept on-prem so confidential pages
+        never leave the host). Image is sent base64-encoded per the Ollama
+        /api/generate ``images`` field.
+
+        A circuit breaker short-circuits after repeated failures: if the model is
+        down/OOM (e.g. HTTP 500 "unexpected EOF"), subsequent calls raise instantly
+        instead of wasting a per-call timeout each — so one broken model can't turn
+        a small document into an hour of failing calls.
         """
         import base64
 
+        if self._vision_disabled:
+            raise RuntimeError("Vision model disabled for this document after repeated failures")
+
         b64 = base64.b64encode(image_bytes).decode("ascii")
-        response = await self.client.post(
-            f"{self.base_url.rstrip('/')}/api/generate",
-            json={
-                "model": self.vision_model,
-                "prompt": prompt,
-                "images": [b64],
-                "options": {"temperature": temperature},
-                "keep_alive": "5m",
-                "stream": False,
-            },
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Ollama vision error: {response.status_code} {response.text}")
-        return (response.json().get("response") or "").strip()
+        try:
+            response = await self.client.post(
+                f"{self.base_url.rstrip('/')}/api/generate",
+                json={
+                    "model": self.vision_model,
+                    "prompt": prompt,
+                    "images": [b64],
+                    "options": {"temperature": temperature},
+                    "keep_alive": "5m",
+                    "stream": False,
+                },
+                timeout=settings.vision_timeout_seconds,
+            )
+            if response.status_code != 200:
+                raise RuntimeError(f"Ollama vision error: {response.status_code} {response.text}")
+            self._vision_failures = 0  # a success closes the breaker
+            return (response.json().get("response") or "").strip()
+        except Exception:
+            self._vision_failures += 1
+            if (
+                not self._vision_disabled
+                and self._vision_failures >= settings.vision_max_consecutive_failures
+            ):
+                self._vision_disabled = True
+                logger.warning(
+                    "Vision model disabled for the rest of this document after %s "
+                    "consecutive failures (model likely down/OOM); skipping remaining "
+                    "vision calls.",
+                    self._vision_failures,
+                )
+            raise
 
     async def generate(
         self,

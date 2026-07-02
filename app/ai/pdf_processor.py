@@ -56,7 +56,23 @@ class PDFProcessor:
                 _DOCLING_UNAVAILABLE = True
                 logger.warning("Docling is not installed: %s. Using traditional extraction from now on.", exc)
             except Exception as exc:
-                logger.warning("Docling extraction failed: %s. Falling back to traditional extraction.", exc)
+                logger.warning("Docling extraction failed: %s.", exc)
+                # A common failure is Docling's OCR engine failing to initialize
+                # (e.g. RapidOCR/onnxruntime missing). Retry Docling WITHOUT its own
+                # OCR before giving up — digital PDFs still get Docling's structured
+                # text + TableFormer (and our Paddle OCR covers scanned pages),
+                # rather than losing all Docling features to the traditional path.
+                if settings.docling_do_ocr:
+                    try:
+                        logger.info("Retrying Docling with do_ocr disabled.")
+                        return self._extract_with_docling(filepath, file_id=file_id, force_no_ocr=True)
+                    except Exception as exc2:
+                        logger.warning(
+                            "Docling retry (no OCR) also failed: %s. Falling back to traditional extraction.",
+                            exc2,
+                        )
+                else:
+                    logger.warning("Falling back to traditional extraction.")
 
         # Fallback to traditional extraction
         try:
@@ -77,13 +93,19 @@ class PDFProcessor:
             )
             # Surface silent content loss: an image-based page that yields no text
             # usually means OCR failed (often out-of-memory on a large render),
-            # not that the page is blank — flag it instead of dropping it quietly.
-            if not native_text and not ocr_text and (rendered_pages.get(page_number) or page_images):
-                logger.warning(
-                    "Page %s produced no text from OCR; it will have no chunks "
-                    "(OCR may have failed, e.g. low memory).",
-                    page_number,
-                )
+            # Distinguish silent content loss from a genuinely blank page: an
+            # image-bearing page with no text usually means OCR failed (often
+            # out-of-memory), which is worth a warning; a page with neither text
+            # nor images is simply blank, so log it quietly.
+            if not native_text and not ocr_text:
+                if page_images:
+                    logger.warning(
+                        "Page %s has image content but produced no text (OCR may have "
+                        "failed, e.g. low memory).",
+                        page_number,
+                    )
+                else:
+                    logger.info("Page %s appears blank (no text, no images).", page_number)
             # Tables come from a real text/vector layer (a sparse data table still
             # counts). A table-extraction failure must never lose the page.
             tables = []
@@ -114,8 +136,14 @@ class PDFProcessor:
 
         return pages
 
-    def _extract_with_docling(self, filepath: str, file_id: Optional[str] = None) -> list[Dict[str, Any]]:
-        """Extract document content using Docling for better structured parsing."""
+    def _extract_with_docling(
+        self, filepath: str, file_id: Optional[str] = None, force_no_ocr: bool = False
+    ) -> list[Dict[str, Any]]:
+        """Extract document content using Docling for better structured parsing.
+
+        ``force_no_ocr`` disables Docling's own OCR (used as a retry when the OCR
+        engine fails to initialize) so digital PDFs still get Docling structure.
+        """
         try:
             from docling.document_converter import DocumentConverter
             from docling.document_converter import PdfFormatOption
@@ -131,9 +159,9 @@ class PDFProcessor:
         # light and Paddle errors can't abort embedding. Enable docling_do_ocr to
         # let Docling OCR pages itself — required to recover tables from SCANNED
         # PDFs via TableFormer, at the cost of extra memory/models.
-        pipeline_options.do_ocr = settings.docling_do_ocr
+        pipeline_options.do_ocr = settings.docling_do_ocr and not force_no_ocr
         pipeline_options.do_table_structure = True  # TableFormer cell structure
-        if settings.docling_do_ocr:
+        if pipeline_options.do_ocr:
             # A fully-scanned page is one big image; without full-page OCR Docling
             # only reads detected sub-regions and TableFormer gets no cell text,
             # so it finds no table. Force OCR over the whole page.

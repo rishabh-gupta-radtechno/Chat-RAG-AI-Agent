@@ -76,6 +76,10 @@ class RAGPipeline:
         try:
             if filepath.endswith(".pdf"):
                 page_documents = self.pdf_processor.extract_page_documents(filepath, file_id=str(file_id))
+                # Vision passes share one circuit breaker per document: once the
+                # model fails repeatedly, both the table fallback and the figure
+                # pass stop calling it for the rest of this document.
+                self.llm_client.reset_vision_breaker()
                 if settings.enable_vision_table_fallback:
                     await self._refine_low_confidence_tables(filepath, page_documents)
                 if settings.enable_chart_extraction:
@@ -482,8 +486,14 @@ class RAGPipeline:
                 not (page.get("native_text") or "").strip()
                 and bool((page.get("ocr_text") or "").strip())
             )
+            # Only vision-refine tables that are (a) a REAL table — validate_table
+            # rejects repeating header/footer boxes and prose-in-a-grid — AND (b)
+            # low confidence. This stops the fallback firing on every page's header
+            # box (which validate_table would reject downstream anyway).
+            page_prose = page.get("native_text") or page.get("ocr_text") or ""
             flags = [
-                page_is_ocr or self.pdf_processor._table_is_low_confidence(t)
+                self.text_processor.validate_table(t, page_prose)
+                and (page_is_ocr or self.pdf_processor._table_is_low_confidence(t))
                 for t in tables
             ]
             n_low = sum(1 for f in flags if f)
