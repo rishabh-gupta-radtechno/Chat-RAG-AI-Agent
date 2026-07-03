@@ -376,6 +376,20 @@ class VectorDBClient:
         ]
 
     @staticmethod
+    def _ordered_phrase_pattern(query_terms: list[str]) -> str:
+        """Regex core matching the query terms in order, allowing up to two filler
+        words between consecutive terms.
+
+        Stop-words (of/the/and/for…) are stripped from query_terms, so an exact
+        adjacency test turns "principle of operation" into "principle operation"
+        and never matches the real text — defeating the heading/phrase bonuses. The
+        small-gap match lets the exact heading "2 PRINCIPLE OF OPERATION" still earn
+        those bonuses (also fixes "table of contents", "bill of materials", etc.).
+        """
+        gap = r"(?:\s+\w+){0,2}\s+"
+        return gap.join(re.escape(term) for term in query_terms)
+
+    @staticmethod
     def _keyword_score(query_terms: list[str], text: str) -> float:
         raw_lines = [
             " ".join(re.findall(r"[a-z0-9]+", line.lower()))
@@ -391,31 +405,30 @@ class VectorDBClient:
             return 0.0
 
         score = len(matched_terms) / len(query_terms)
-        query_phrase = " ".join(query_terms)
-        if query_phrase in normalized_text:
+
+        core = VectorDBClient._ordered_phrase_pattern(query_terms)
+        ordered_re = re.compile(rf"\b{core}\b")
+        if ordered_re.search(normalized_text):
             score += 0.75
 
         words = normalized_text.split()
-        phrase_count = normalized_text.count(query_phrase) if query_phrase else 0
+        phrase_count = sum(1 for _ in ordered_re.finditer(normalized_text))
         if phrase_count:
             score += min(0.5, phrase_count * 0.1)
 
         first_words = " ".join(words[:24])
-        if query_phrase and query_phrase in first_words:
+        if ordered_re.search(first_words):
             score += 0.5
 
-        section_heading = re.search(
-            rf"\b\d+(\.\d+)*\s+{re.escape(query_phrase)}\b",
-            normalized_text,
-        )
+        section_heading = re.search(rf"\b\d+(\.\d+)*\s+{core}\b", normalized_text)
         if section_heading:
             score += 1.0
 
         for line in raw_lines:
-            if re.fullmatch(rf"\d+(\.\d+)*\s+{re.escape(query_phrase)}", line):
+            if re.fullmatch(rf"\d+(\.\d+)*\s+{core}", line):
                 score += 2.0
                 break
-            if re.match(rf"\d+(\.\d+)*\s+{re.escape(query_phrase)}\s+\w+", line):
+            if re.match(rf"\d+(\.\d+)*\s+{core}\s+\w+", line):
                 score += 0.25
                 break
 

@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     use_local_embeddings: bool = False
 
     # RAG
-    vector_search_top_k: int = 5
+    vector_search_top_k: int = 8
     similarity_threshold: float = 0.5
     retrieval_neighbor_pages: int = 1
     rag_context_docs: int = 6

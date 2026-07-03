@@ -155,15 +155,61 @@ class ChatService:
             logger.error(f"Error processing question: {e}")
             raise
 
-    async def _build_retrieval_query(self, message: str, history: list) -> tuple[str, str]:
-        """Expand retrieval query with recent user turns for follow-up questions.
+    # Markers that a message leans on the previous turn for its meaning.
+    _ANAPHORA_RE = re.compile(
+        r"\b(it|its|it's|that|this|these|those|them|they|their|same|the above|above)\b",
+        re.IGNORECASE,
+    )
+    _CONTINUATION_RE = re.compile(
+        r"^\s*(and|also|what about|then|so|ok|okay|but)\b",
+        re.IGNORECASE,
+    )
 
-        Returns (full_query, embed_query). bge-m3 handles multilingual queries natively
-        so the message is embedded directly without translation.
+    @classmethod
+    def _is_followup(cls, message: str) -> bool:
+        """True when retrieval should lean on prior turns to resolve the message.
+
+        A follow-up carries little standalone content: it has almost no content
+        terms, opens with a continuation word ("and…", "what about…"), or uses an
+        anaphor ("it/that/this") with little else. A self-contained question such
+        as "what is the principle of operation?" is NOT a follow-up, so its
+        retrieval stays independent of the previous (possibly unrelated) topic and
+        can land in any document.
         """
-        prior_questions = [turn.question.strip() for turn in history[-2:] if getattr(turn, "question", "").strip()]
-        query_parts = prior_questions + [message]
-        return "\n".join(query_parts), message
+        text = (message or "").strip()
+        if not text:
+            return False
+        terms = cls._important_terms(text)
+        if len(terms) <= 1:
+            return True
+        if cls._CONTINUATION_RE.search(text):
+            return True
+        if cls._ANAPHORA_RE.search(text) and len(terms) <= 3:
+            return True
+        return False
+
+    async def _build_retrieval_query(self, message: str, history: list) -> tuple[str, str]:
+        """Build (keyword_query, embed_query) for retrieval.
+
+        Conversation history is prepended to the keyword/lexical query ONLY for
+        genuine follow-up questions (see _is_followup); a self-contained question
+        retrieves on its own terms so an earlier, unrelated topic cannot drag
+        retrieval onto the wrong document. The embedding always uses the bare
+        message — bge-m3 handles multilingual queries natively without translation.
+        """
+        if history and self._is_followup(message):
+            prior_questions = [
+                turn.question.strip()
+                for turn in history[-2:]
+                if getattr(turn, "question", "").strip()
+            ]
+            if prior_questions:
+                logger.info(
+                    "Follow-up detected; expanding retrieval query with %d prior turn(s)",
+                    len(prior_questions),
+                )
+                return "\n".join(prior_questions + [message]), message
+        return message, message
 
     async def _translate_query_for_retrieval(self, message: str) -> str:
         """Translate Hindi/Devanagari questions to English for retrieval.
