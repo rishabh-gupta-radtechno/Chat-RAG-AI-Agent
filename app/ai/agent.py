@@ -136,6 +136,14 @@ class ReActAgent:
         if exact_section:
             return exact_section
 
+        # The command-verb "steps" extractor below only makes sense for a question
+        # that asks for a procedure. For a factual question ("what is the speed of
+        # propagation?") it fabricates a step out of any unrelated command verb
+        # (Release/Use/Fit) present in the chunk, so skip it and let the
+        # direct-answer / LLM path give the actual fact.
+        if not self._is_procedural_question(question):
+            return ""
+
         for document in documents:
             chunk_text = (document.get("chunk_text") or "").strip()
             if not chunk_text:
@@ -366,6 +374,21 @@ class ReActAgent:
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip()
 
+    # Cues that a question asks for a procedure (so the command-verb step
+    # extractor is appropriate). Absent these, the question is treated as factual.
+    _PROCEDURE_CUE_RE = re.compile(
+        r"\b(how\s+(?:to|do|does|can|should|is|are)|steps?|procedure|process|"
+        r"install(?:ation)?|remov(?:e|al)|dismantl|disassembl|assembl|reassembl|"
+        r"adjust|replace|renew|fit(?:ment|ting)?|lubricat|overhaul|mount|dismount|"
+        r"clean|instruction)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_procedural_question(cls, question: str) -> bool:
+        """True when the question asks for a procedure / steps rather than a fact."""
+        return bool(cls._PROCEDURE_CUE_RE.search(question or ""))
+
     @staticmethod
     def _important_terms(text: str) -> list[str]:
         stop_words = {
@@ -373,6 +396,9 @@ class ReActAgent:
             "in", "is", "of", "on", "or", "please", "should", "the",
             "to", "what", "when", "where", "which", "with", "you",
             "about", "describe", "explain", "give", "tell", "why",
+            # Demonstratives are never content terms; keeping them inflates the
+            # term count and skews the section / direct-answer thresholds.
+            "this", "that", "these", "those", "its",
         }
         return [
             term

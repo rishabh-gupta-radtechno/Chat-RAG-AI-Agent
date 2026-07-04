@@ -520,6 +520,9 @@ Answer:
             "a", "an", "and", "are", "for", "how", "in", "is", "of", "on",
             "or", "the", "to", "what", "when", "where", "which", "with",
             "tell", "about", "explain", "describe", "give",
+            # Demonstratives are never content terms; keeping them inflates the
+            # term count and skews the direct-answer / evidence thresholds.
+            "this", "that", "these", "those", "its",
         }
         return [
             term
