@@ -132,9 +132,15 @@ class ReActAgent:
         if not question_terms:
             return ""
 
-        exact_section = self._extract_exact_section_answer(question, documents)
-        if exact_section:
-            return exact_section
+        # Verbatim section extraction is for bare heading-style questions
+        # ("REASSEMBLING", "DISMANTLING PROCEDURE"). A descriptive/interrogative
+        # question ("what is the principle of operation?") wants a synthesized,
+        # concluded answer, so defer it to the LLM rather than dumping raw section
+        # text (which starts mid-paragraph and can run across manuals).
+        if self._is_heading_question(question):
+            exact_section = self._extract_exact_section_answer(question, documents)
+            if exact_section:
+                return exact_section
 
         # The command-verb "steps" extractor below only makes sense for a question
         # that asks for a procedure. For a factual question ("what is the speed of
@@ -187,6 +193,7 @@ class ReActAgent:
 
         best_section = ""
         best_score = -1
+        best_filename = ""
         for document in ordered_chunks:
             text = self._document_text(document)
             if not text:
@@ -213,12 +220,17 @@ class ReActAgent:
             if score > best_score:
                 best_score = score
                 best_section = cleaned_section
+                best_filename = str(document.get("filename") or document.get("file_name") or "")
 
+        # A section split across chunks is stitched back together, but ONLY within
+        # the best-matching manual — never blend different documents' sections into
+        # one answer (that produced the multi-manual "principle of operation" dump).
         combined = "\n".join(
             self._document_text(document)
             for document in ordered_chunks
             if self._document_text(document)
-        )
+            and str(document.get("filename") or document.get("file_name") or "") == best_filename
+        ) if best_filename else ""
         combined_section = ""
         combined_score = -1
         if combined.strip():
@@ -388,6 +400,27 @@ class ReActAgent:
     def _is_procedural_question(cls, question: str) -> bool:
         """True when the question asks for a procedure / steps rather than a fact."""
         return bool(cls._PROCEDURE_CUE_RE.search(question or ""))
+
+    # Interrogative / descriptive markers. Their presence means the user wants a
+    # synthesized answer, not a verbatim manual heading dumped back.
+    _INTERROGATIVE_RE = re.compile(
+        r"\b(what|how|why|which|where|when|who|whose|is|are|was|were|do|does|did|"
+        r"can|could|should|would|will|explain|describe|tell|give|list|define)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_heading_question(cls, question: str) -> bool:
+        """True for a bare heading-style question ("REASSEMBLING", "WEAR LIMITS").
+
+        These want the verbatim manual section. An interrogative/descriptive
+        question ("what is the principle of operation?") does not — it is deferred
+        to the LLM so the answer is summarized and concluded, not a raw section dump.
+        """
+        text = (question or "").strip()
+        if not text or cls._INTERROGATIVE_RE.search(text):
+            return False
+        return 1 <= len(cls._important_terms(text)) <= 5
 
     @staticmethod
     def _important_terms(text: str) -> list[str]:

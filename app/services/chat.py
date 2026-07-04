@@ -311,6 +311,7 @@ Answer with page numbers for important facts, using short citations like "(page 
 When a source is labeled with a section, cite that section with the page, e.g. "(section 3.1 Main Valve, page 6)".
 When a fact comes from a table, read the exact cell value and cite the table by its name and page, e.g. "(table \"DV Specifications\", page 4)".
 Prefer exact wording from the context for definitions, names, numbers, limits, and procedures.
+Reproduce every technical value EXACTLY as written in the context — numbers, measurements, tolerances, units, dimensions, part/item numbers and their labels (e.g. "3.8±0.1 kg/cm²", "585mm", "nut 35", "spindle 23"). Never round, convert, drop, or invent a value; if a value is not in the context, do not state one.
 Each source is labelled with the manual (filename) it came from. When the question is about a specific component or piece of equipment, prefer the source whose manual and section most specifically match it (e.g. a section titled for that exact component) over a generic mention in a different manual.
 If two sources give different answers for the same thing, do not merge, average, or silently pick one — report each manual's answer separately with its filename and page, e.g. "<Manual A> (page X) specifies ...; <Manual B> (page Y) specifies ...".
 If related diagrams are available, include a short "Diagrams" line with their page numbers.
@@ -438,9 +439,26 @@ Answer:
 
         return "\n".join(lines)
 
+    # Questions that want an explanation, not a single extracted value/sentence.
+    _DESCRIPTIVE_RE = re.compile(
+        r"\b(principle|explain|describe|overview|mechanism|purpose\s+of|function\s+of)\b"
+        r"|how\s+(?:does|do|is|are|it)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_descriptive_question(cls, message: str) -> bool:
+        """True for explanatory questions ('principle of operation', 'how does X work')."""
+        return bool(cls._DESCRIPTIVE_RE.search(message or ""))
+
     def _extract_direct_answer(self, message: str, documents: list[dict], diagrams: list[dict]) -> str:
         query_terms = self._important_terms(message)
         if not query_terms:
+            return ""
+
+        # A descriptive question wants a synthesized answer; a single extracted
+        # sentence would start mid-context and short-circuit the LLM, so defer it.
+        if self._is_descriptive_question(message):
             return ""
 
         best_document = None
