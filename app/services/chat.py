@@ -451,14 +451,39 @@ Answer:
         """True for explanatory questions ('principle of operation', 'how does X work')."""
         return bool(cls._DESCRIPTIVE_RE.search(message or ""))
 
+    # A question naming a measurable quantity wants a single value; one that only
+    # names a component ("Manually Operated Quick Release Portion") wants its whole
+    # section, which the LLM must assemble.
+    _VALUE_NOUN_RE = re.compile(
+        r"\b(speed|pressure|rate|limit|value|distance|dimension|temperature|torque|"
+        r"interval|time|weight|size|capacity|tolerance|clearance|gap|diameter|length|"
+        r"width|height|volume|force|load|quantity|number|range|frequency|voltage|"
+        r"current|power|angle|thickness|depth|stroke|setting|reading|level|ratio|"
+        r"percentage)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _has_value_noun(cls, message: str) -> bool:
+        """True when the question asks for a measurable value rather than a description."""
+        return bool(cls._VALUE_NOUN_RE.search(message or ""))
+
     def _extract_direct_answer(self, message: str, documents: list[dict], diagrams: list[dict]) -> str:
         query_terms = self._important_terms(message)
         if not query_terms:
             return ""
 
-        # A descriptive question wants a synthesized answer; a single extracted
-        # sentence would start mid-context and short-circuit the LLM, so defer it.
-        if self._is_descriptive_question(message):
+        # A descriptive OR procedural question wants a synthesized, complete answer;
+        # a single extracted sentence would start mid-context and drop steps, so
+        # defer both to the LLM.
+        if self._is_descriptive_question(message) or ReActAgent._is_procedural_question(message):
+            return ""
+        # This path answers single-value factual questions ("what is the SPEED of
+        # X"). A definitional question that only names a component ("what is the
+        # Manually Operated Quick Release Portion?") has no value noun and its answer
+        # is a whole section — defer it to the LLM instead of returning a lone
+        # heading sentence from whichever manual happened to rank first.
+        if not self._has_value_noun(message):
             return ""
 
         best_document = None

@@ -127,7 +127,12 @@ class ReActAgent:
         return context
 
     def _extract_procedure_answer(self, question: str, documents: list[dict]) -> str:
-        """Extract obvious procedure steps directly from manual text."""
+        """Return a verbatim manual section for a bare heading-style question only.
+
+        Everything else is deferred to the LLM: descriptive/procedural questions
+        are synthesised (so no step is dropped and every value is preserved) and
+        single-value facts are handled by _extract_direct_answer.
+        """
         question_terms = set(self._important_terms(question))
         if not question_terms:
             return ""
@@ -142,34 +147,12 @@ class ReActAgent:
             if exact_section:
                 return exact_section
 
-        # The command-verb "steps" extractor below only makes sense for a question
-        # that asks for a procedure. For a factual question ("what is the speed of
-        # propagation?") it fabricates a step out of any unrelated command verb
-        # (Release/Use/Fit) present in the chunk, so skip it and let the
-        # direct-answer / LLM path give the actual fact.
-        if not self._is_procedural_question(question):
-            return ""
-
-        for document in documents:
-            chunk_text = (document.get("chunk_text") or "").strip()
-            if not chunk_text:
-                continue
-
-            normalized_chunk = self._normalize_text(chunk_text)
-            matched_terms = [term for term in question_terms if term in normalized_chunk]
-            required_terms = 1 if len(question_terms) == 1 else max(2, len(question_terms) - 1)
-            if len(matched_terms) < required_terms:
-                continue
-
-            section_text = self._section_text_after_heading(chunk_text, question_terms)
-            steps = self._procedure_steps(section_text)
-            if steps:
-                heading = " ".join(term.capitalize() for term in self._important_terms(question))
-                numbered_steps = "\n".join(
-                    f"{index}. {step}" for index, step in enumerate(steps, start=1)
-                )
-                return f"{heading}:\n{numbered_steps}"
-
+        # Procedures are handled by the LLM, not by a command-verb "steps"
+        # extractor. That extractor only recognised a fixed verb list, so it
+        # silently DROPPED steps whose verb it didn't know ("Unlock", "Assemble",
+        # "Slide") and merged the remainder — losing content and numbering. The LLM
+        # (with the numbered-steps + strict-value-preservation prompt) reproduces
+        # the full ordered procedure, so defer to it here.
         return ""
 
     def _extract_exact_section_answer(self, question: str, documents: list[dict]) -> str:
@@ -388,11 +371,13 @@ class ReActAgent:
 
     # Cues that a question asks for a procedure (so the command-verb step
     # extractor is appropriate). Absent these, the question is treated as factual.
+    # Stem cues (no trailing \b) so inflected forms match: "assembl" -> assembly/
+    # assembling/assembled, "dismantl" -> dismantling, "lubricat" -> lubrication.
     _PROCEDURE_CUE_RE = re.compile(
         r"\b(how\s+(?:to|do|does|can|should|is|are)|steps?|procedure|process|"
-        r"install(?:ation)?|remov(?:e|al)|dismantl|disassembl|assembl|reassembl|"
-        r"adjust|replace|renew|fit(?:ment|ting)?|lubricat|overhaul|mount|dismount|"
-        r"clean|instruction)\b",
+        r"install|remov|dismantl|disassembl|assembl|reassembl|"
+        r"adjust|replace|renew|fit|lubricat|overhaul|mount|dismount|"
+        r"clean|instruction)",
         re.IGNORECASE,
     )
 
