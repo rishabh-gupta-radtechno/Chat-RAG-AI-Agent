@@ -273,6 +273,38 @@ class TextProcessor:
         """Caption/heading to prepend to every chunk of this table."""
         return str(table.get("title") or table.get("caption") or fallback).strip() or fallback
 
+    # A part-list / bill-of-materials caption line, e.g.
+    # "1.5 PART LIST FOR COMBINED DOUBLE CHECK VALVE AND PRV WITH MANIFOLD".
+    _TABLE_CAPTION_RE = re.compile(
+        r"(?im)^[^\n]*?\b(?:parts?\s+list|list\s+of\s+parts|bill\s+of\s+materials?)\b[^\n]*$"
+    )
+
+    @classmethod
+    def _table_caption_from_prose(cls, page_prose: str, max_len: int = 90) -> Optional[str]:
+        """Recover a table's caption from the page text when the extractor dropped it.
+
+        Docling/pdfplumber/camelot frequently leave ``table["title"]`` empty, so the
+        table chunk carries only column headers + cells and none of the words a user
+        would search ("part list for the combined assembly"). Pull the part-list /
+        bill-of-materials heading off the page so the table becomes findable and
+        self-describing. Page-level: if several tables share a page, they inherit the
+        most descriptive caption found (the table body still disambiguates them).
+        """
+        if not page_prose:
+            return None
+        candidates = [
+            re.sub(r"\s+", " ", line).strip()
+            for line in cls._TABLE_CAPTION_RE.findall(page_prose)
+        ]
+        candidates = [c for c in candidates if c]
+        if not candidates:
+            return None
+        # Prefer a heading-length line (rejects prose sentences that merely mention
+        # "parts list"); among those keep the most descriptive (longest).
+        short = [c for c in candidates if len(c) <= max_len]
+        pool = short or [candidates[0][:max_len].strip()]
+        return max(pool, key=len)
+
     @staticmethod
     def table_to_markdown(header: list, rows: list) -> str:
         """Render a table as GitHub-flavored Markdown (header row repeated by caller)."""
@@ -699,6 +731,7 @@ class TextProcessor:
             document_page_number = meta["document_page_number"]
 
             page_prose = page.get("native_text") or page.get("ocr_text") or ""
+            recovered_caption = self._table_caption_from_prose(page_prose)
             for table_index, table in enumerate(page.get("tables", []), start=1):
                 # Reject false-positive tables (paragraph text forced into a grid,
                 # or a reformatted copy of the page prose) before they pollute RAG.
@@ -709,6 +742,11 @@ class TextProcessor:
                         file_name,
                     )
                     continue
+                # Give a caption-less table its page's part-list/BoM heading, so it
+                # is retrievable ("part list for the combined assembly …") and the
+                # chunk states which assembly it belongs to.
+                if recovered_caption and not (table.get("title") or table.get("caption")):
+                    table["caption"] = recovered_caption
                 table_id = f"table_{page_number}_{table_index}"
                 table_title = self._table_title(table, fallback=f"Table {table_index}")
                 # Persist the structured grid (header + rows) alongside the markdown so

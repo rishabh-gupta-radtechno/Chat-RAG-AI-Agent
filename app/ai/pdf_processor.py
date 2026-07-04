@@ -87,6 +87,13 @@ class PDFProcessor:
 
         pages: list[Dict[str, Any]] = []
         for page_number, raw_native_text in enumerate(native_pages, start=1):
+            # Recover a shredded text layer (see _looks_garbled) from the intact
+            # embedded text before it reaches retrieval.
+            if self._looks_garbled(raw_native_text):
+                recovered = self._recover_text_layer(filepath, page_number)
+                if recovered:
+                    logger.info("page=%s garbled native text recovered from raw text layer", page_number)
+                    raw_native_text = recovered
             page_images = images_by_page.get(page_number, [])
             native_text, ocr_text = self._resolve_page_text(
                 raw_native_text, rendered_pages.get(page_number), page_images
@@ -260,6 +267,15 @@ class PDFProcessor:
         pages: list[Dict[str, Any]] = []
         for page_number in range(1, page_count + 1):
             raw_native_text = "\n".join(pages_text.get(page_number, []))
+            # Docling's full-page OCR can shred a clean digital page's text layer
+            # ("...set at 3.8 kg/cm2 perform..." -> "pre n n s sthe"). When the
+            # assembled text looks garbled, recover the intact embedded text layer
+            # (pypdfium2/fitz) so the real content reaches retrieval.
+            if self._looks_garbled(raw_native_text):
+                recovered = self._recover_text_layer(filepath, page_number)
+                if recovered:
+                    logger.info("page=%s garbled Docling text recovered from raw text layer", page_number)
+                    raw_native_text = recovered
             # Multi-column digital pages can be read as one full-width flow (columns
             # interleaved line by line). If this page has a real text layer laid out
             # in columns, re-read it in column order. No-op for single-column and
@@ -904,6 +920,61 @@ class PDFProcessor:
             return False
 
         return True
+
+    @staticmethod
+    def _looks_garbled(text: str) -> bool:
+        """True when text has a run of >=3 lowercase single-letter tokens.
+
+        This is the signature of a shredded text layer. Docling's full-page OCR of a
+        clean digital page can mangle a sentence, e.g. "...set at 3.8 kg/cm2 perform
+        an emergency application and note the" -> "pre n n s sthe". Uppercase
+        single-letter runs (maintenance-schedule codes E/O/C, parts-applicability
+        marks "X X X X") are legitimate table content, so only LOWERCASE runs count
+        (verified 0 false positives across the sample library).
+        """
+        run = best = 0
+        for token in (text or "").split():
+            if len(token) == 1 and token.isalpha() and token.islower():
+                run += 1
+                best = max(best, run)
+            else:
+                run = 0
+        return best >= 3
+
+    @staticmethod
+    def _recover_text_layer(filepath: str, page_number: int) -> str:
+        """Raw embedded text layer for one page (no OCR, no layout model).
+
+        Rescues a page whose primary extraction came out garbled: the digital text
+        layer is intact even when Docling's OCR shredded it. Tries pypdfium2 then
+        fitz and returns the first NON-garbled result (they fail on different fonts);
+        returns "" when neither is clean (e.g. a genuinely scanned page), so a
+        scanned page is never "recovered" to empty text.
+        """
+        candidates: list[str] = []
+        try:
+            import pypdfium2
+
+            pdf = pypdfium2.PdfDocument(filepath)
+            try:
+                if 1 <= page_number <= len(pdf):
+                    candidates.append(pdf[page_number - 1].get_textpage().get_text_range() or "")
+            finally:
+                pdf.close()
+        except Exception:
+            pass
+        try:
+            import fitz
+
+            with fitz.open(filepath) as document:
+                if 1 <= page_number <= len(document):
+                    candidates.append(document[page_number - 1].get_text("text") or "")
+        except Exception:
+            pass
+        for text in candidates:
+            if text.strip() and not PDFProcessor._looks_garbled(text):
+                return text
+        return ""
 
     def _resolve_page_text(
         self,

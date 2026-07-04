@@ -311,6 +311,8 @@ Answer with page numbers for important facts, using short citations like "(page 
 When a source is labeled with a section, cite that section with the page, e.g. "(section 3.1 Main Valve, page 6)".
 When a fact comes from a table, read the exact cell value and cite the table by its name and page, e.g. "(table \"DV Specifications\", page 4)".
 Prefer exact wording from the context for definitions, names, numbers, limits, and procedures.
+Each source is labelled with the manual (filename) it came from. When the question is about a specific component or piece of equipment, prefer the source whose manual and section most specifically match it (e.g. a section titled for that exact component) over a generic mention in a different manual.
+If two sources give different answers for the same thing, do not merge, average, or silently pick one — report each manual's answer separately with its filename and page, e.g. "<Manual A> (page X) specifies ...; <Manual B> (page Y) specifies ...".
 If related diagrams are available, include a short "Diagrams" line with their page numbers.
 If the retrieved context does not support the answer, say the documents do not provide enough information.
 Do not use outside knowledge.
