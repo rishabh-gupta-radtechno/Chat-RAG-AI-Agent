@@ -208,7 +208,12 @@ class ChatService:
                     "Follow-up detected; expanding retrieval query with %d prior turn(s)",
                     len(prior_questions),
                 )
-                return "\n".join(prior_questions + [message]), message
+                # Expand BOTH the keyword query and the embedding: a bare anaphoric
+                # follow-up ("how does it do that?") embeds too generically and pulls
+                # any manual's "how it works" content, so ground the vector search in
+                # the conversation's subject too.
+                expanded = "\n".join(prior_questions + [message])
+                return expanded, expanded
         return message, message
 
     async def _translate_query_for_retrieval(self, message: str) -> str:
@@ -306,7 +311,7 @@ Question:
 
         prompt = f"""Answer the user's latest message using the retrieved context and recent conversation.
 Respond in the same language the user used. If the user wrote in Hindi, answer in Hindi (Devanagari script) and keep any English technical terms, abbreviations, measurements, and numbers from the source exactly as written.
-Use the conversation history for follow-up references such as 'it', 'that', or 'the above part'.
+For a follow-up, resolve references like 'it', 'that', or 'the above part' to the specific subject established earlier in the conversation, and answer about THAT subject. Use only the source(s) that describe that subject; if the retrieved sources are about a different device or manual, say the documents do not cover it rather than answering from an unrelated source.
 Answer with page numbers for important facts, using short citations like "(page 3)".
 When a source is labeled with a section, cite that section with the page, e.g. "(section 3.1 Main Valve, page 6)".
 When a fact comes from a table, read the exact cell value and cite the table by its name and page, e.g. "(table \"DV Specifications\", page 4)".
@@ -317,7 +322,7 @@ When the answer differs across manuals, OR the question is general (not tied to 
 If related diagrams are available, include a short "Diagrams" line with their page numbers.
 If the retrieved context does not support the answer, say the documents do not provide enough information.
 Do not use outside knowledge.
-Keep the answer direct and concise.
+Keep the answer direct and concise: answer a simple factual question in one or two sentences and stop. Add operating detail (pistons, springs, valve seats, step-by-step behaviour) only when the question explicitly asks how something works or for a procedure.
 
 Recent conversation:
 {history_text}
