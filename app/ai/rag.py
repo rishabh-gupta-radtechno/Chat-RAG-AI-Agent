@@ -221,6 +221,9 @@ class RAGPipeline:
                 # out of text retrieval so they never occupy a context slot.
                 if document.get("content_type") == "diagram":
                     continue
+                # A table of contents / index page is navigation, never an answer.
+                if self._is_index_chunk(document):
+                    continue
                 document_id = document.get("id")
                 document["lexical_score"] = self.vector_db._keyword_score(
                     self.vector_db._keyword_terms(query),
@@ -385,6 +388,8 @@ class RAGPipeline:
             candidate_id = str(candidate.get("id"))
             if candidate_id in by_id:
                 continue
+            if self._is_index_chunk(candidate):
+                continue
             candidate_file = str(candidate.get("file_id"))
             candidate_page = int(candidate.get("page_number") or 0)
             if not candidate_file or not candidate_page:
@@ -431,6 +436,35 @@ class RAGPipeline:
         except Exception as e:
             logger.warning(f"Reranking failed: {e}")
             return documents
+
+    @staticmethod
+    def _is_index_chunk(document: dict) -> bool:
+        """True for a table-of-contents / index / table-of-figures chunk.
+
+        Such a chunk only lists section titles and the pages they live on — a
+        navigation aid, never an answer — so it is excluded from retrieval context
+        and sources. A ToC extracted as a TABLE is tagged page_type='content' at
+        ingest (the "a page with a table is real content" rule), so the retrieval
+        toc penalty misses it; this catches it by its 'PAGE' column instead.
+
+        Detection is deliberately precise (an explicit contents/figures heading, or
+        a PAGE column beside a description/section column) so genuine data tables —
+        wear-limit and part-list tables that also carry section numbers — are kept.
+        """
+        if str(document.get("page_type") or "").lower() == "toc":
+            return True
+        text = document.get("chunk_text") or ""
+        if re.search(r"table\s+of\s+contents|table\s+of\s+figures|list\s+of\s+(?:contents|figures)", text, re.IGNORECASE):
+            return True
+        if re.search(r"\bcontents\b[\s\W]{1,3}\bdescription\b", text, re.IGNORECASE):
+            return True
+        header = " ".join(str(h) for h in (document.get("table_header") or [])).lower()
+        if re.search(r"\bpages?\b", header) and re.search(
+            r"\b(description|contents|title|section|chapter|sr\.?\s*no|s\.?\s*no|sl\.?\s*no|particulars)\b",
+            header,
+        ):
+            return True
+        return False
 
     @staticmethod
     def _combined_retrieval_score(document: dict) -> float:
