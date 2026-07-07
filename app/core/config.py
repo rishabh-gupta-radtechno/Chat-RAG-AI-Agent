@@ -71,10 +71,29 @@ class Settings(BaseSettings):
     pdf_chunk_size: int = 250
     pdf_chunk_overlap: int = 20
     # Max table rows per chunk; large tables split into batches, header repeated.
+    # Acts only as an upper bound now — the real driver is the token budget below,
+    # so a wide table splits before it can overflow the embedding context.
     table_rows_per_chunk: int = 15
     # Reject an "extracted table" whose text is >= this % similar to the page's
     # prose — it's a false-positive table (paragraphs reformatted into cells).
     table_vs_text_similarity_threshold: int = 85
+
+    # Embedding context handling. bge-m3 accepts 8192 tokens; earlier the embed
+    # request set no num_ctx, so Ollama applied its 2048 default and 500'd on any
+    # longer chunk (the chunk was then silently skipped). We now (a) tell Ollama
+    # the real window + truncate=true, (b) estimate tokens and split oversized
+    # chunks before embedding, and (c) recursively split + retry if a chunk still
+    # overflows — so no page content is ever dropped.
+    embed_num_ctx: int = 8192               # embedding model context window (tokens)
+    embed_safety_margin_tokens: int = 256   # reserve; split before the hard limit
+    embed_min_chunk_tokens: int = 48        # stop recursive splitting below this
+    embed_chars_per_token: float = 4.0      # heuristic divisor for token estimation
+    embed_max_chars: int = 32000            # last-resort hard char cap before embed
+    embed_split_max_depth: int = 12         # recursion guard for split-and-retry
+    # HF tokenizer id used for *exact* token counts when estimating chunk size.
+    # Loaded lazily and cached; if it can't be fetched (offline / not installed)
+    # we fall back to the char/word heuristic above. Empty string = heuristic only.
+    embed_tokenizer_model: str = "BAAI/bge-m3"
 
     # Chunk deduplication (run at ingest, before/after embedding)
     dedup_enabled: bool = True

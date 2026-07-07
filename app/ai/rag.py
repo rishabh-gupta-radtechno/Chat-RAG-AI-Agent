@@ -29,6 +29,7 @@ class RAGPipeline:
         self._bm25_corpus = []
         self._bm25_index = None
         self._reranker = None
+        self._local_embed_model = None
         self._initialized = False
 
     async def initialize(self):
@@ -111,43 +112,67 @@ class RAGPipeline:
                 ]
                 logger.info(f"Created {len(chunks)} chunks")
 
-            # Generate embeddings and upsert
+            # Generate embeddings and upsert. A single source chunk may embed as
+            # several child chunks when it exceeds the embedding context window
+            # (see _embed_text_with_splitting) — each gets a suffixed chunk_id.
             vectors = []
             seen_chunk_ids: set[str] = set()
+            next_index = 0
             for i, chunk in enumerate(chunks):
+                base_meta = chunk.get("metadata", {}) or {}
+                chunk_type = base_meta.get("content_type", "text")
+                page_number = base_meta.get("page_number", 0)
+                parent_chunk_id = base_meta.get("chunk_id") or (
+                    f"{filename}|page{page_number}|{chunk_type}|{i:03d}"
+                )
+
                 try:
-                    if settings.use_local_embeddings:
-                        embedding = self._embed_locally(chunk["text"])
-                    else:
-                        embedding = await self.llm_client.embed(chunk["text"])
-                    metadata = chunk.get("metadata", {})
+                    embedded = await self._embed_text_with_splitting(
+                        chunk["text"],
+                        doc_name=filename,
+                        page_number=page_number,
+                        chunk_type=chunk_type,
+                    )
+                except Exception as e:
+                    # A genuine embedding failure (service down, etc.) — logged
+                    # loudly with full context. Context-length overflow never
+                    # reaches here; it is split and retried instead of skipped.
+                    logger.error(
+                        "Failed to embed chunk %s (doc=%s page=%s type=%s id=%s): %s",
+                        i, filename, page_number, chunk_type, parent_chunk_id, e,
+                    )
+                    continue
+
+                multi = len(embedded) > 1
+                for part_no, (part_text, embedding) in enumerate(embedded, start=1):
+                    metadata = dict(base_meta)
                     metadata["file_id"] = str(file_id)
                     if user_id:
                         metadata["user_id"] = str(user_id)
                     metadata["filename"] = filename
                     metadata["filepath"] = filepath
-                    metadata["chunk_index"] = i
-                    metadata["chunk_size"] = len(chunk["text"])
-                    metadata["chunk_text"] = chunk["text"]
+                    metadata["chunk_index"] = next_index
+                    metadata["chunk_size"] = len(part_text)
+                    metadata["chunk_text"] = part_text
 
-                    chunk_id = metadata.get("chunk_id")
-                    if not chunk_id:
-                        chunk_id = f"{filename}|page{metadata.get('page_number', 0)}|{metadata.get('content_type', 'text')}|{i:03d}"
-                        metadata["chunk_id"] = chunk_id
+                    chunk_id = parent_chunk_id if not multi else f"{parent_chunk_id}#p{part_no:02d}"
+                    metadata["chunk_id"] = chunk_id
+                    if multi:
+                        metadata["parent_chunk_id"] = parent_chunk_id
+                        metadata["split_part"] = part_no
+                        metadata["split_total"] = len(embedded)
 
                     if chunk_id in seen_chunk_ids:
                         logger.warning(f"Skipping duplicate chunk id while embedding: {chunk_id}")
                         continue
                     seen_chunk_ids.add(chunk_id)
+                    next_index += 1
 
                     vectors.append({
                         "id": str(uuid.uuid5(file_id, chunk_id)),
                         "embedding": embedding,
                         "metadata": metadata,
                     })
-                except Exception as e:
-                    logger.warning(f"Error embedding chunk {i}: {e}")
-                    continue
 
             # Stage 3: drop near-identical chunks by embedding cosine similarity.
             vectors = self._dedup_by_embedding(vectors)
@@ -707,17 +732,133 @@ class RAGPipeline:
         )
         return match.group(1) if match else None
 
-    def _embed_locally(self, text: str) -> list[float]:
-        """Generate embeddings using local sentence-transformers model."""
+    async def _embed(self, text: str) -> list[float]:
+        """Embed one string via the configured backend (local ST model or Ollama).
+
+        If local embeddings are requested but sentence-transformers is missing, we
+        fall back to Ollama here (awaited correctly) rather than in the sync
+        ``_embed_locally``, which cannot await the coroutine.
+        """
+        if settings.use_local_embeddings:
+            try:
+                return self._embed_locally(text)
+            except ImportError:
+                logger.warning("sentence-transformers not installed, falling back to Ollama")
+        return await self.llm_client.embed(text)
+
+    @staticmethod
+    def _is_context_length_error(exc: Exception) -> bool:
+        """True when an embedding failure is caused by the input exceeding context."""
+        message = str(exc).lower()
+        return "context length" in message or "exceeds the context" in message
+
+    async def _embed_text_with_splitting(
+        self,
+        text: str,
+        *,
+        doc_name: str,
+        page_number,
+        chunk_type: str,
+        depth: int = 0,
+    ) -> list[tuple[str, list[float]]]:
+        """Embed ``text``, splitting oversized content so nothing is ever dropped.
+
+        Guarantees (for non-empty text):
+          1. If the estimated token count exceeds the embedding budget, the text
+             is split into sub-budget pieces *before* the first embed call.
+          2. If an embed call still fails with a context-length error, the piece
+             is split further and each part retried recursively, down to a minimum
+             chunk size (below which we let Ollama's truncate=true store what fits).
+          3. A non-context error is re-raised for the caller to log — it is never
+             silently swallowed.
+
+        Returns a list of ``(text, embedding)`` pairs (one per surviving child).
+        Every split/retry is logged with doc/page/type/token metadata.
+        """
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        budget = TextProcessor.embed_token_budget()
+        est = TextProcessor.estimate_tokens(text)
+
+        # (1) Proactive split: too big by estimate — break it up before embedding.
+        if est > budget and depth < settings.embed_split_max_depth:
+            parts = TextProcessor.split_text_by_tokens(text, budget)
+            if len(parts) > 1:
+                logger.info(
+                    "embed proactive-split doc=%s page=%s type=%s est_tokens=%s "
+                    "budget=%s depth=%s -> %s child chunks",
+                    doc_name, page_number, chunk_type, est, budget, depth, len(parts),
+                )
+                results: list[tuple[str, list[float]]] = []
+                for part in parts:
+                    results.extend(
+                        await self._embed_text_with_splitting(
+                            part, doc_name=doc_name, page_number=page_number,
+                            chunk_type=chunk_type, depth=depth + 1,
+                        )
+                    )
+                return results
+
+        # Last-resort hard char cap (only bites a single pathological token/run).
+        if len(text) > settings.embed_max_chars:
+            logger.warning(
+                "embed char-cap doc=%s page=%s type=%s chars=%s -> truncated to %s",
+                doc_name, page_number, chunk_type, len(text), settings.embed_max_chars,
+            )
+            text = text[: settings.embed_max_chars]
+
+        # (2) Try to embed; on a context-length error, split further and retry.
         try:
+            embedding = await self._embed(text)
+            return [(text, embedding)]
+        except Exception as e:
+            can_split = (
+                self._is_context_length_error(e)
+                and depth < settings.embed_split_max_depth
+                and est > settings.embed_min_chunk_tokens
+            )
+            if not can_split:
+                raise
+            # Halve the *current* text's estimated size each retry (not the global
+            # budget) so an under-estimate that slipped past the budget still
+            # converges: a chunk that failed at N tokens is re-split toward N/2.
+            smaller = max(TextProcessor.estimate_tokens(text) // 2, settings.embed_min_chunk_tokens)
+            parts = TextProcessor.split_text_by_tokens(text, smaller)
+            if len(parts) <= 1:
+                # Cannot reduce further (single huge token); re-raise to be logged.
+                raise
+            logger.warning(
+                "embed retry-split doc=%s page=%s type=%s est_tokens=%s "
+                "new_budget=%s depth=%s err=%s -> %s child chunks",
+                doc_name, page_number, chunk_type, est, smaller, depth, e, len(parts),
+            )
+            results = []
+            for part in parts:
+                results.extend(
+                    await self._embed_text_with_splitting(
+                        part, doc_name=doc_name, page_number=page_number,
+                        chunk_type=chunk_type, depth=depth + 1,
+                    )
+                )
+            return results
+
+    def _embed_locally(self, text: str) -> list[float]:
+        """Generate embeddings using the local sentence-transformers model.
+
+        The model is loaded once and cached on the instance (it was previously
+        rebuilt on every chunk, which is very slow). Raises ImportError when
+        sentence-transformers is unavailable so the caller can fall back to Ollama.
+        """
+        if self._local_embed_model is None:
             from sentence_transformers import SentenceTransformer
             from app.core.device import torch_device
-            model = SentenceTransformer(settings.embedding_model_local, device=torch_device())
-            embedding = model.encode(text)
-            return embedding.tolist()
-        except ImportError:
-            logger.warning("sentence-transformers not installed, falling back to Ollama")
-            return self.llm_client.embed(text)  # This is async, but for simplicity
+            self._local_embed_model = SentenceTransformer(
+                settings.embedding_model_local, device=torch_device()
+            )
+        embedding = self._local_embed_model.encode(text)
+        return embedding.tolist()
 
     async def health_check(self) -> dict:
         """Check health of RAG components."""

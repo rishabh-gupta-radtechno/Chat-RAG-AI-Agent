@@ -163,7 +163,16 @@ class OllamaClient:
             path = f"/{path}"
 
         url = f"{self.base_url.rstrip('/')}{path}"
-        payload = {"model": self.embedding_model}
+        # Tell Ollama the model's real context window (bge-m3 = 8192) instead of
+        # letting it fall back to the 2048 default, and enable truncation so a
+        # borderline-oversized input is trimmed rather than 500'd. The RAG layer
+        # splits chunks by token budget before we get here, so truncation is only
+        # a last-resort guard against an under-estimate — it should rarely fire.
+        payload = {
+            "model": self.embedding_model,
+            "truncate": True,
+            "options": {"num_ctx": settings.embed_num_ctx},
+        }
 
         if path == "/api/embed":
             payload["input"] = text

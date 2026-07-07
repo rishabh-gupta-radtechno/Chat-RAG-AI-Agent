@@ -162,6 +162,108 @@ class TextProcessor:
                 chunks.append(chunk)
         return chunks
 
+    # --- Token budgeting for the embedding model -------------------------------
+    # We estimate rather than run the real bge-m3 (XLM-R sentencepiece) tokenizer:
+    # loading it costs memory/startup and the exact count is not needed — the goal
+    # is only to split *before* the context limit, and the embed layer truncates +
+    # retry-splits as a backstop if the estimate is low.
+
+    # Lazily-loaded embedding tokenizer (shared across instances). ``False`` marks
+    # a load that failed so we don't retry it on every call.
+    _embed_tokenizer = None
+    _embed_tokenizer_failed = False
+
+    @classmethod
+    def _get_embed_tokenizer(cls):
+        """Return the real embedding tokenizer, or None to use the heuristic.
+
+        Loaded once and cached. A missing model / offline host / absent
+        transformers all degrade silently to the char-word heuristic.
+        """
+        if cls._embed_tokenizer is not None:
+            return cls._embed_tokenizer
+        if cls._embed_tokenizer_failed:
+            return None
+        name = settings.embed_tokenizer_model
+        if not name:
+            cls._embed_tokenizer_failed = True
+            return None
+        try:
+            from transformers import AutoTokenizer
+
+            cls._embed_tokenizer = AutoTokenizer.from_pretrained(name)
+            logger.info("Loaded embedding tokenizer '%s' for exact token counts", name)
+        except Exception as exc:  # not installed / offline / bad id
+            cls._embed_tokenizer_failed = True
+            logger.warning(
+                "Embedding tokenizer '%s' unavailable (%s); using char/word heuristic",
+                name, exc,
+            )
+        return cls._embed_tokenizer
+
+    @classmethod
+    def estimate_tokens(cls, text: str) -> int:
+        """Token count for a piece of text.
+
+        Uses the real embedding tokenizer when available (exact); otherwise falls
+        back to a conservative heuristic — the larger of a char-based and a
+        word-based estimate, biased toward over-counting so we split a little
+        early rather than overflow the context window.
+        """
+        if not text:
+            return 0
+        tokenizer = cls._get_embed_tokenizer()
+        if tokenizer is not None:
+            try:
+                return len(tokenizer.encode(text, add_special_tokens=True))
+            except Exception:
+                pass  # fall through to the heuristic on any tokenizer hiccup
+        chars_per_token = settings.embed_chars_per_token or 4.0
+        char_estimate = int(len(text) / chars_per_token)
+        word_estimate = int(len(text.split()) * 1.3)
+        return max(char_estimate, word_estimate) + 1
+
+    @staticmethod
+    def embed_token_budget() -> int:
+        """Usable embedding budget: the context window minus a safety margin."""
+        budget = settings.embed_num_ctx - settings.embed_safety_margin_tokens
+        return max(budget, settings.embed_min_chunk_tokens)
+
+    @classmethod
+    def split_text_by_tokens(cls, text: str, max_tokens: Optional[int] = None) -> list[str]:
+        """Greedily split text so each piece is (best-effort) <= ``max_tokens``.
+
+        O(n) single pass over the words with a running token estimate. A lone word
+        longer than the budget is emitted on its own — the embed layer truncates
+        such pathological tokens rather than looping forever.
+        """
+        text = (text or "").strip()
+        if not text:
+            return []
+        max_tokens = max(max_tokens or cls.embed_token_budget(), 1)
+        if cls.estimate_tokens(text) <= max_tokens:
+            return [text]
+
+        chars_per_token = settings.embed_chars_per_token or 4.0
+
+        def _running_tokens(char_count: int, word_count: int) -> int:
+            return max(int(char_count / chars_per_token), int(word_count * 1.3)) + 1
+
+        chunks: list[str] = []
+        cur: list[str] = []
+        cur_chars = 0
+        for word in text.split():
+            add_chars = len(word) + (1 if cur else 0)  # +1 for the joining space
+            if cur and _running_tokens(cur_chars + add_chars, len(cur) + 1) > max_tokens:
+                chunks.append(" ".join(cur))
+                cur, cur_chars = [], 0
+                add_chars = len(word)
+            cur.append(word)
+            cur_chars += add_chars
+        if cur:
+            chunks.append(" ".join(cur))
+        return [c for c in (c.strip() for c in chunks) if c]
+
     @staticmethod
     def extract_text_from_pdf(filepath: str) -> list[tuple[int, str]]:
         """Extract text from PDF file, returning a list of (page_number, text) tuples."""
@@ -851,20 +953,29 @@ class TextProcessor:
             raw = (page.get("native_text") or page.get("ocr_text") or "").strip()
             fallback = self._strip_boilerplate(self.clean_pdf_page_text(raw), boilerplate).strip() if raw else ""
             fallback = fallback or f"Page {page_number} (no extractable text content)."
-            _add_chunk(
-                fallback,
-                {
-                    "file_name": file_name,
-                    "page_number": page_number,
-                    "document_page_number": meta["document_page_number"],
-                    "content_type": "text",
-                    "page_type": meta["page_type"],
-                    "section_number": None,
-                    "section_title": None,
-                    "chunk_id": f"{file_name}|page{page_number}|fallback|001",
-                },
+            # A full OCR-heavy page can be thousands of tokens — never embed it
+            # whole. Split into word-bounded parts (same as section text) so an
+            # image-only page still contributes searchable, sub-budget chunks.
+            fallback_parts = self.chunk_text_by_words(fallback) or [fallback]
+            for part_index, part_text in enumerate(fallback_parts, start=1):
+                _add_chunk(
+                    part_text,
+                    {
+                        "file_name": file_name,
+                        "page_number": page_number,
+                        "document_page_number": meta["document_page_number"],
+                        "content_type": "text",
+                        "page_type": meta["page_type"],
+                        "section_number": None,
+                        "section_title": None,
+                        "chunk_id": f"{file_name}|page{page_number}|fallback|{part_index:03d}",
+                    },
+                )
+            logger.info(
+                "page=%s fallback chunk(s) generated (no other content produced): %s part(s)",
+                page_number,
+                len(fallback_parts),
             )
-            logger.info("page=%s fallback chunk generated (no other content produced)", page_number)
 
         # Diagnostics: chunks generated per page.
         from collections import Counter
@@ -884,14 +995,18 @@ class TextProcessor:
             return None
         return int(matches[-1])
 
-    def chunk_table_text(self, table: dict) -> list[str]:
+    def chunk_table_text(self, table: dict, max_tokens: Optional[int] = None) -> list[str]:
         """Chunk a structured table for retrieval.
 
         Each chunk carries: the table title (caption/heading), a Markdown block
         with the header repeated, and a semantic ``key=value`` line per row so
-        BGE-M3 embeds each row as a self-contained fact. Large tables are split
-        into row-batches (the header is repeated in every batch), so a long table
-        never lands in a single chunk.
+        BGE-M3 embeds each row as a self-contained fact.
+
+        Rows are grouped by *token budget* (not a fixed row count): each chunk is
+        packed with as many rows as fit under ``max_tokens`` (accounting for the
+        title + header repeated in every chunk), capped by ``table_rows_per_chunk``
+        as an upper bound. A wide table therefore splits into more, smaller chunks
+        and can never overflow the embedding context.
         """
         header = [str(h).strip() for h in table.get("header", [])]
         rows = table.get("rows", []) or []
@@ -901,10 +1016,10 @@ class TextProcessor:
             md = self.table_to_markdown(header, [])
             return [f"Table: {title}\n\n{md}".strip()] if md else []
 
-        rows_per_chunk = max(1, settings.table_rows_per_chunk)
-        chunks: list[str] = []
-        for start in range(0, len(rows), rows_per_chunk):
-            group = rows[start : start + rows_per_chunk]
+        max_tokens = max_tokens or self.embed_token_budget()
+        row_cap = max(1, settings.table_rows_per_chunk)
+
+        def _render(group: list) -> str:
             markdown = self.table_to_markdown(header, group)  # header repeated per chunk
             semantic = "\n".join(
                 line for line in (self._row_to_semantic(header, row) for row in group) if line
@@ -912,5 +1027,33 @@ class TextProcessor:
             parts = [f"Table: {title}", markdown]
             if semantic:
                 parts.append("Rows:\n" + semantic)
-            chunks.append("\n\n".join(p for p in parts if p).strip())
+            return "\n\n".join(p for p in parts if p).strip()
+
+        # Fixed per-chunk overhead (title + header + separator), repeated in each.
+        base_tokens = self.estimate_tokens(_render([]))
+        # Per-row cost = its markdown line + its semantic key=value line.
+        row_tokens = [
+            self.estimate_tokens(
+                self.table_to_markdown(header, [row]).splitlines()[-1]
+                + "\n"
+                + self._row_to_semantic(header, row)
+            )
+            for row in rows
+        ]
+
+        chunks: list[str] = []
+        start = 0
+        while start < len(rows):
+            group: list = []
+            used = base_tokens
+            end = start
+            while end < len(rows):
+                candidate = used + row_tokens[end]
+                if group and (candidate > max_tokens or len(group) >= row_cap):
+                    break
+                group.append(rows[end])
+                used = candidate
+                end += 1
+            chunks.append(_render(group))
+            start = end
         return chunks
