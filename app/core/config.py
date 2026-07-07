@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     # Heavier ACCURATE TableFormer model — better on complex tables, more memory.
     # Left off by default on this memory-constrained host; enable if RAM allows.
     docling_table_accurate: bool = True
+    # Convert equations to LaTeX with Docling's formula-understanding (CodeFormula)
+    # model so formulas reach retrieval as text instead of being flattened/garbled.
+    # Downloads an extra model and adds ingest time + memory; disable with
+    # DOCLING_FORMULA_ENRICHMENT=false on a RAM-constrained host.
+    docling_formula_enrichment: bool = True
     ocr_engine: str = "paddleocr"
     ocr_lang: str = "en"  # PaddleOCR language code; mapped to the Tesseract equivalent
     enable_diagram_captioning: bool = False

@@ -196,6 +196,17 @@ class PDFProcessor:
             except Exception as exc:
                 logger.debug("Could not set TableFormer ACCURATE mode: %s", exc)
 
+        # Formula understanding: convert detected equation regions to LaTeX so they
+        # reach retrieval as text (Docling emits them as FORMULA-labelled TextItems,
+        # which the per-page text loop below already collects). Best-effort — an
+        # older Docling without this option raises when the field is set, so it is
+        # logged and skipped rather than aborting extraction.
+        if settings.docling_formula_enrichment:
+            try:
+                pipeline_options.do_formula_enrichment = True
+            except Exception as exc:
+                logger.warning("Could not enable Docling formula enrichment: %s", exc)
+
         # Run Docling's models (layout, TableFormer, OCR) on the GPU when one is
         # available; otherwise CPU. The accelerator classes moved modules across
         # Docling versions, so try both import paths. Best-effort: any failure

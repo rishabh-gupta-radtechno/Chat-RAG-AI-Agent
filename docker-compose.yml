@@ -87,6 +87,9 @@ services:
       # Let Docling OCR pages so TableFormer can recover tables from scanned PDFs
       # (memory-heavy — needs enough RAM; see OCR out-of-memory notes).
       - DOCLING_DO_OCR=true
+      # Convert equations to LaTeX (Docling CodeFormula model). Extra model +
+      # memory/time at ingest; set false on a RAM-constrained host.
+      - DOCLING_FORMULA_ENRICHMENT=true
       # HuggingFace Hub: optional token for higher download rate limits (set
       # HF_TOKEN in .env). HF_HOME points the model cache at a persistent volume
       # so Docling/transformers models download once, not on every recreate.
