@@ -139,84 +139,47 @@ class RAGPipeline:
                 progress["chunks"] = len(chunks)
                 logger.info(f"Created {len(chunks)} chunks")
 
-            # Generate embeddings and upsert. A single source chunk may embed as
-            # several child chunks when it exceeds the embedding context window
-            # (see _embed_text_with_splitting) — each gets a suffixed chunk_id.
+            # Embed + upsert in page-windows, flushing after every N pages. All
+            # chunk relationships (chart/table/diagram links, cross-content dedup,
+            # boilerplate, sections) were already resolved document-wide above, so
+            # windowing only controls WHEN vectors are written — never HOW chunks
+            # relate. Benefits: peak memory is bounded to one window's embeddings
+            # (not the whole document's), and each flush persists progress so a
+            # crash part-way through embedding keeps the windows already saved.
             progress["stage"] = "embedding"
-            vectors = []
+            # A chunk's several embedding parts (oversized text split by
+            # _embed_text_with_splitting) share these across windows so chunk_index
+            # stays globally monotonic and no chunk_id is emitted twice.
             seen_chunk_ids: set[str] = set()
-            next_index = 0
-            for i, chunk in enumerate(chunks):
-                base_meta = chunk.get("metadata", {}) or {}
-                chunk_type = base_meta.get("content_type", "text")
-                page_number = base_meta.get("page_number", 0)
-                parent_chunk_id = base_meta.get("chunk_id") or (
-                    f"{filename}|page{page_number}|{chunk_type}|{i:03d}"
-                )
+            embed_state = {"next_index": 0}
+            total_vectors = 0
 
-                try:
-                    embedded = await self._embed_text_with_splitting(
-                        chunk["text"],
-                        doc_name=filename,
-                        page_number=page_number,
-                        chunk_type=chunk_type,
-                    )
-                except Exception as e:
-                    # A genuine embedding failure (service down, etc.) — logged
-                    # loudly with full context. Context-length overflow never
-                    # reaches here; it is split and retried instead of skipped.
-                    logger.error(
-                        "Failed to embed chunk %s (doc=%s page=%s type=%s id=%s): %s",
-                        i, filename, page_number, chunk_type, parent_chunk_id, e,
-                    )
-                    progress["embed_failures"] += 1
+            for win_start, win_end, window_chunks in self._iter_page_windows(chunks):
+                if not window_chunks:
                     continue
+                vectors = await self._embed_window(
+                    window_chunks, file_id, filename, filepath, user_id,
+                    seen_chunk_ids, embed_state, progress,
+                )
+                # Stage 3 dedup runs per window (near-identical chunks are almost
+                # always on the same/adjacent pages, so they fall in one window).
+                vectors = self._dedup_by_embedding(vectors)
+                if vectors:
+                    progress["stage"] = f"upsert(pages {win_start}-{win_end})"
+                    await self.vector_db.upsert_vectors(vectors)
+                    total_vectors += len(vectors)
+                    progress["vectors"] = total_vectors
+                    logger.info(
+                        "Flushed page-window pages=%s-%s doc=%s window_vectors=%s total_vectors=%s",
+                        win_start, win_end, filename, len(vectors), total_vectors,
+                    )
+                progress["stage"] = "embedding"
 
-                multi = len(embedded) > 1
-                for part_no, (part_text, embedding) in enumerate(embedded, start=1):
-                    metadata = dict(base_meta)
-                    metadata["file_id"] = str(file_id)
-                    if user_id:
-                        metadata["user_id"] = str(user_id)
-                    metadata["filename"] = filename
-                    metadata["filepath"] = filepath
-                    metadata["chunk_index"] = next_index
-                    metadata["chunk_size"] = len(part_text)
-                    metadata["chunk_text"] = part_text
-
-                    chunk_id = parent_chunk_id if not multi else f"{parent_chunk_id}#p{part_no:02d}"
-                    metadata["chunk_id"] = chunk_id
-                    if multi:
-                        metadata["parent_chunk_id"] = parent_chunk_id
-                        metadata["split_part"] = part_no
-                        metadata["split_total"] = len(embedded)
-
-                    if chunk_id in seen_chunk_ids:
-                        logger.warning(f"Skipping duplicate chunk id while embedding: {chunk_id}")
-                        continue
-                    seen_chunk_ids.add(chunk_id)
-                    next_index += 1
-
-                    vectors.append({
-                        "id": str(uuid.uuid5(file_id, chunk_id)),
-                        "embedding": embedding,
-                        "metadata": metadata,
-                    })
-
-            # Stage 3: drop near-identical chunks by embedding cosine similarity.
-            vectors = self._dedup_by_embedding(vectors)
-
-            progress["stage"] = "upsert"
-            if vectors:
-                await self.vector_db.upsert_vectors(vectors)
-                logger.info(f"Upserted {len(vectors)} vectors")
-            progress["vectors"] = len(vectors)
             progress["stage"] = "done"
-
             self._log_document_summary(
                 filename, file_id, progress, started_at, error=None,
             )
-            return len(vectors)
+            return total_vectors
 
         except Exception as e:
             logger.exception(
@@ -230,6 +193,113 @@ class RAGPipeline:
                 filename, file_id, progress, started_at, error=e,
             )
             raise
+
+    @staticmethod
+    def _iter_page_windows(chunks: list[dict]):
+        """Yield ``(win_start, win_end, window_chunks)`` grouped by page-window.
+
+        Windows are half-open page ranges of ``embed_page_batch_size`` pages
+        ([1..N], [N+1..2N], …). Every chunk of a given page stays together in one
+        window (whole pages are never split across windows), which keeps all
+        same-page relationships — chart data/summary/image, table chunks, a
+        diagram and its linked text — inside a single flush. Non-PDF chunks
+        (page_number 0) fall into the first window. Chunk ORDER is preserved
+        within each window so downstream indexing is stable.
+        """
+        batch_pages = max(1, settings.embed_page_batch_size)
+
+        def page_of(chunk: dict) -> int:
+            try:
+                return int(chunk.get("metadata", {}).get("page_number", 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        max_page = max((page_of(c) for c in chunks), default=0)
+        for win_start in range(0, max_page + 1, batch_pages):
+            win_end = win_start + batch_pages - 1  # inclusive, for logging
+            window_chunks = [
+                c for c in chunks
+                if win_start <= page_of(c) <= win_end
+            ]
+            yield win_start, win_end, window_chunks
+
+    async def _embed_window(
+        self,
+        chunks: list[dict],
+        file_id,
+        filename: str,
+        filepath: str,
+        user_id,
+        seen_chunk_ids: set,
+        embed_state: dict,
+        progress: dict,
+    ) -> list[dict]:
+        """Embed one page-window's chunks into vector records (pre-upsert).
+
+        A single source chunk may embed as several child vectors when it exceeds
+        the embedding context window (see _embed_text_with_splitting) — each gets
+        a suffixed chunk_id. ``seen_chunk_ids`` and ``embed_state['next_index']``
+        are carried across windows so chunk ids stay unique and chunk_index stays
+        globally monotonic for the whole document.
+        """
+        vectors: list[dict] = []
+        for i, chunk in enumerate(chunks):
+            base_meta = chunk.get("metadata", {}) or {}
+            chunk_type = base_meta.get("content_type", "text")
+            page_number = base_meta.get("page_number", 0)
+            parent_chunk_id = base_meta.get("chunk_id") or (
+                f"{filename}|page{page_number}|{chunk_type}|{i:03d}"
+            )
+
+            try:
+                embedded = await self._embed_text_with_splitting(
+                    chunk["text"],
+                    doc_name=filename,
+                    page_number=page_number,
+                    chunk_type=chunk_type,
+                )
+            except Exception as e:
+                # A genuine embedding failure (service down, etc.) — logged loudly
+                # with full context. Context-length overflow never reaches here;
+                # it is split and retried instead of skipped.
+                logger.error(
+                    "Failed to embed chunk %s (doc=%s page=%s type=%s id=%s): %s",
+                    i, filename, page_number, chunk_type, parent_chunk_id, e,
+                )
+                progress["embed_failures"] += 1
+                continue
+
+            multi = len(embedded) > 1
+            for part_no, (part_text, embedding) in enumerate(embedded, start=1):
+                metadata = dict(base_meta)
+                metadata["file_id"] = str(file_id)
+                if user_id:
+                    metadata["user_id"] = str(user_id)
+                metadata["filename"] = filename
+                metadata["filepath"] = filepath
+                metadata["chunk_index"] = embed_state["next_index"]
+                metadata["chunk_size"] = len(part_text)
+                metadata["chunk_text"] = part_text
+
+                chunk_id = parent_chunk_id if not multi else f"{parent_chunk_id}#p{part_no:02d}"
+                metadata["chunk_id"] = chunk_id
+                if multi:
+                    metadata["parent_chunk_id"] = parent_chunk_id
+                    metadata["split_part"] = part_no
+                    metadata["split_total"] = len(embedded)
+
+                if chunk_id in seen_chunk_ids:
+                    logger.warning(f"Skipping duplicate chunk id while embedding: {chunk_id}")
+                    continue
+                seen_chunk_ids.add(chunk_id)
+                embed_state["next_index"] += 1
+
+                vectors.append({
+                    "id": str(uuid.uuid5(file_id, chunk_id)),
+                    "embedding": embedding,
+                    "metadata": metadata,
+                })
+        return vectors
 
     def _warn_if_vision_just_tripped(
         self, was_disabled: bool, doc_name: str, page_number, context: str

@@ -90,6 +90,14 @@ class Settings(BaseSettings):
     embed_chars_per_token: float = 4.0      # heuristic divisor for token estimation
     embed_max_chars: int = 32000            # last-resort hard char cap before embed
     embed_split_max_depth: int = 12         # recursion guard for split-and-retry
+    # Incremental upsert: after building + dedup'ing all chunks document-wide, we
+    # embed and write them to the vector DB in page-windows of this many pages,
+    # flushing after each window. Bounds peak memory (only one window's embeddings
+    # are held at once instead of the whole document's) and persists progress
+    # incrementally, so a crash part-way through embedding keeps the windows
+    # already saved instead of discarding the entire document. Chunk relationships
+    # are resolved document-wide before this, so windowing never splits them.
+    embed_page_batch_size: int = 25
     # HF tokenizer id used for *exact* token counts when estimating chunk size.
     # Loaded lazily and cached; if it can't be fetched (offline / not installed)
     # we fall back to the char/word heuristic above. Empty string = heuristic only.
