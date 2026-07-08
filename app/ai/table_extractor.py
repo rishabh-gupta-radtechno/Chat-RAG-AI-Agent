@@ -35,14 +35,31 @@ class TableExtractor:
     def __init__(self, llm_client: Any) -> None:
         self._llm = llm_client
 
-    async def analyze(self, image_bytes: bytes) -> List[Dict[str, Any]]:
-        """Return every table found in the image; [] on error or when none found."""
+    async def analyze(
+        self,
+        image_bytes: bytes,
+        *,
+        doc_name: str = "",
+        page_number: Any = None,
+    ) -> List[Dict[str, Any]]:
+        """Return every table found in the image; [] on error or when none found.
+
+        ``doc_name``/``page_number`` are used only for diagnostic logging so a
+        vision failure names the exact PDF and page it happened on (a 500
+        "unexpected EOF" here usually means the local vision model OOM'd on the
+        host — see OllamaClient.vision).
+        """
         if not image_bytes:
             return []
+        where = self._where(doc_name, page_number)
         try:
             raw = await self._llm.vision(self.PROMPT, image_bytes)
         except Exception as exc:  # vision failure must never abort ingestion
-            logger.warning("Table vision call failed: %s", exc)
+            logger.warning(
+                "Table vision call failed%s (image_bytes=%s): %s. "
+                "Keeping rules-based table; sync continues.",
+                where, len(image_bytes), exc,
+            )
             return []
 
         parsed = ChartExtractor._parse_json(raw)
@@ -66,3 +83,13 @@ class TableExtractor:
                     "rows": rows,
                 })
         return records
+
+    @staticmethod
+    def _where(doc_name: str, page_number: Any) -> str:
+        """Human-readable ' [doc=… page=…]' suffix for logs (empty if unknown)."""
+        parts = []
+        if doc_name:
+            parts.append(f"doc={doc_name}")
+        if page_number is not None:
+            parts.append(f"page={page_number}")
+        return f" [{' '.join(parts)}]" if parts else ""

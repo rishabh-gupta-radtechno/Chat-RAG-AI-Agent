@@ -3,7 +3,9 @@ RAG (Retrieval-Augmented Generation) pipeline.
 """
 
 import math
+import os
 import re
+import time
 import uuid
 from typing import Optional
 
@@ -74,20 +76,44 @@ class RAGPipeline:
         user_id: Optional[uuid.UUID] = None,
     ) -> int:
         """Process and embed a document."""
+        # Per-document progress, so the end-of-document summary (success OR
+        # failure) reports exactly how far ingestion got and where it stopped.
+        started_at = time.perf_counter()
+        progress = {
+            "stage": "starting",
+            "pages": 0,
+            "chunks": 0,
+            "embed_failures": 0,
+            "vectors": 0,
+        }
         try:
+            try:
+                file_size = os.path.getsize(filepath)
+            except OSError:
+                file_size = -1
+            logger.info(
+                "Begin embedding doc=%s file_id=%s size_bytes=%s",
+                filename, file_id, file_size,
+            )
             if filepath.endswith(".pdf"):
+                progress["stage"] = "pdf_extraction"
                 page_documents = self.pdf_processor.extract_page_documents(filepath, file_id=str(file_id))
+                progress["pages"] = len(page_documents)
                 # Vision passes share one circuit breaker per document: once the
                 # model fails repeatedly, both the table fallback and the figure
                 # pass stop calling it for the rest of this document.
                 self.llm_client.reset_vision_breaker()
                 if settings.enable_vision_table_fallback:
-                    await self._refine_low_confidence_tables(filepath, page_documents)
+                    progress["stage"] = "vision_table_fallback"
+                    await self._refine_low_confidence_tables(filepath, page_documents, filename)
                 if settings.enable_chart_extraction:
-                    await self._extract_figures(filepath, page_documents, file_id)
+                    progress["stage"] = "figure_extraction"
+                    await self._extract_figures(filepath, page_documents, file_id, filename)
+                progress["stage"] = "chunking"
                 chunks = self.text_processor.build_pdf_chunks(page_documents, filename)
                 # Stages 1 & 2: exact + diagram/fuzzy dedup before embedding.
                 chunks = self.text_processor.deduplicate_chunks(chunks)
+                progress["chunks"] = len(chunks)
                 logger.info(
                     "Extracted PDF page data for %s pages and created %s chunks",
                     len(page_documents),
@@ -110,11 +136,13 @@ class RAGPipeline:
                     }
                     for i, chunk in enumerate(self.text_processor.chunk_by_sentences(text))
                 ]
+                progress["chunks"] = len(chunks)
                 logger.info(f"Created {len(chunks)} chunks")
 
             # Generate embeddings and upsert. A single source chunk may embed as
             # several child chunks when it exceeds the embedding context window
             # (see _embed_text_with_splitting) — each gets a suffixed chunk_id.
+            progress["stage"] = "embedding"
             vectors = []
             seen_chunk_ids: set[str] = set()
             next_index = 0
@@ -141,6 +169,7 @@ class RAGPipeline:
                         "Failed to embed chunk %s (doc=%s page=%s type=%s id=%s): %s",
                         i, filename, page_number, chunk_type, parent_chunk_id, e,
                     )
+                    progress["embed_failures"] += 1
                     continue
 
                 multi = len(embedded) > 1
@@ -177,15 +206,91 @@ class RAGPipeline:
             # Stage 3: drop near-identical chunks by embedding cosine similarity.
             vectors = self._dedup_by_embedding(vectors)
 
+            progress["stage"] = "upsert"
             if vectors:
                 await self.vector_db.upsert_vectors(vectors)
                 logger.info(f"Upserted {len(vectors)} vectors")
+            progress["vectors"] = len(vectors)
+            progress["stage"] = "done"
 
+            self._log_document_summary(
+                filename, file_id, progress, started_at, error=None,
+            )
             return len(vectors)
 
         except Exception as e:
-            logger.error(f"Error processing document: {e}")
+            logger.exception(
+                "Error processing document doc=%s file_id=%s filepath=%s: %s",
+                filename, file_id, filepath, e,
+            )
+            # End-of-document summary on the failure path: names the doc, the
+            # stage it died in, and how much work was completed before it stopped
+            # — so a stalled/failed sync is diagnosable from one line.
+            self._log_document_summary(
+                filename, file_id, progress, started_at, error=e,
+            )
             raise
+
+    def _warn_if_vision_just_tripped(
+        self, was_disabled: bool, doc_name: str, page_number, context: str
+    ) -> bool:
+        """Emit a live WARNING the instant the vision circuit breaker trips.
+
+        Returns the breaker's current disabled state so the caller can pass it back
+        in as ``was_disabled`` next time, making this fire exactly once per document
+        (at the moment it flips from enabled to disabled) instead of only surfacing
+        in the end-of-document summary. ``context`` names the pass (table/figure).
+        """
+        is_disabled = getattr(self.llm_client, "_vision_disabled", False)
+        if is_disabled and not was_disabled:
+            failures = getattr(self.llm_client, "_vision_failures", 0)
+            logger.warning(
+                "Vision model DISABLED mid-document at doc=%s page=%s during %s after "
+                "%s consecutive failures (model likely down/OOM, e.g. 500 'unexpected "
+                "EOF'); remaining vision calls for this document are skipped.",
+                doc_name, page_number, context, failures,
+            )
+        return is_disabled
+
+    def _log_document_summary(
+        self,
+        filename: str,
+        file_id,
+        progress: dict,
+        started_at: float,
+        error: Optional[BaseException],
+    ) -> None:
+        """Emit one end-of-document line summarizing the whole embedding run.
+
+        Logged on both success and failure. On failure it records the stage that
+        was in progress when it stopped, so a sync that fails or stalls can be
+        diagnosed from a single line (which PDF, how far it got, why it stopped).
+        Also surfaces whether the per-document vision circuit breaker tripped
+        (repeated 500 "unexpected EOF" = the local vision model OOM'd), which is
+        the usual reason a large scanned manual degrades or stresses the host.
+        """
+        elapsed = time.perf_counter() - started_at
+        vision_disabled = getattr(self.llm_client, "_vision_disabled", False)
+        vision_failures = getattr(self.llm_client, "_vision_failures", 0)
+        status = "FAILED" if error is not None else "OK"
+        message = (
+            "Embedding summary doc=%s file_id=%s status=%s stage=%s "
+            "pages=%s chunks=%s vectors=%s embed_failures=%s "
+            "vision_failures=%s vision_disabled=%s duration_seconds=%.1f"
+        )
+        args = (
+            filename, file_id, status, progress.get("stage"),
+            progress.get("pages"), progress.get("chunks"), progress.get("vectors"),
+            progress.get("embed_failures"), vision_failures, vision_disabled,
+            elapsed,
+        )
+        if error is not None:
+            logger.error(
+                message + " error=%s: %s",
+                *args, type(error).__name__, error,
+            )
+        else:
+            logger.info(message, *args)
 
     async def retrieve(
         self,
@@ -517,7 +622,9 @@ class RAGPipeline:
 
         return (semantic_score * 2.0) + lexical_score + content_bonus + section_bonus - page_type_penalty
 
-    async def _refine_low_confidence_tables(self, filepath: str, page_documents: list) -> None:
+    async def _refine_low_confidence_tables(
+        self, filepath: str, page_documents: list, filename: str = ""
+    ) -> None:
         """Re-read only low-confidence tables with the local vision model (on-prem).
 
         Rules-based extraction (Docling + pdfplumber/camelot) handles most tables,
@@ -533,6 +640,7 @@ class RAGPipeline:
             return
 
         extractor = TableExtractor(self.llm_client)
+        vision_was_disabled = getattr(self.llm_client, "_vision_disabled", False)
         for page in page_documents:
             tables = page.get("tables") or []
             if not tables:
@@ -561,16 +669,26 @@ class RAGPipeline:
             logger.info("page=%s: %d low-confidence table(s); rendering for vision fallback", page_number, n_low)
             image = self.pdf_processor.render_page_png(filepath, page_number)
             if not image:
-                logger.warning("page=%s: render failed; vision table fallback skipped", page_number)
+                logger.warning(
+                    "doc=%s page=%s: render failed; vision table fallback skipped",
+                    filename or filepath, page_number,
+                )
                 continue
-            vision_tables = await extractor.analyze(image)
+            vision_tables = await extractor.analyze(
+                image, doc_name=filename or filepath, page_number=page_number
+            )
+            vision_was_disabled = self._warn_if_vision_just_tripped(
+                vision_was_disabled, filename or filepath, page_number, "table fallback"
+            )
             logger.info("page=%s: vision table fallback returned %d table(s)", page_number, len(vision_tables))
             if not vision_tables:
                 continue
             page["tables"] = self.pdf_processor._merge_vision_tables(tables, flags, vision_tables)
             logger.info("page=%s: low-confidence tables refined via vision", page_number)
 
-    async def _extract_figures(self, filepath: str, page_documents: list, file_id) -> None:
+    async def _extract_figures(
+        self, filepath: str, page_documents: list, file_id, filename: str = ""
+    ) -> None:
         """Vision-analyse figure regions on candidate pages (charts AND diagrams).
 
         One local vision call per region classifies and reads it: a data chart ->
@@ -589,6 +707,7 @@ class RAGPipeline:
         # Geometry pre-pass over the PDF (vector drawings / raster / native text).
         candidates = self.pdf_processor.chart_candidate_pages(filepath)
         extractor = ChartExtractor(self.llm_client)
+        vision_was_disabled = getattr(self.llm_client, "_vision_disabled", False)
         for page in page_documents:
             page_number = page.get("page_number")
             # A flattened slide deck has no text layer (pages arrive as OCR) and a
@@ -610,6 +729,9 @@ class RAGPipeline:
                 if not image:
                     continue
                 result = await extractor.analyze_region(image)
+                vision_was_disabled = self._warn_if_vision_just_tripped(
+                    vision_was_disabled, filename or filepath, page_number, "figure extraction"
+                )
                 charts = result.get("charts") or []
                 if charts:
                     image_url = self.pdf_processor._save_diagram_image(

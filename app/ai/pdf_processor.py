@@ -539,6 +539,34 @@ class PDFProcessor:
             return 0.0
         return len(a & b) / len(a | b)
 
+    @staticmethod
+    def _log_mupdf_warnings(filepath: str, page_number: Optional[int] = None) -> None:
+        """Drain MuPDF's warning buffer and log any messages with file/page context.
+
+        MuPDF (via PyMuPDF/fitz) prints malformed-content-stream errors such as
+        ``syntax error: unknown keyword: 'q1.0'`` straight to stderr with no
+        indication of which PDF or page triggered them, which makes them useless
+        for diagnosis. fitz accumulates the same messages in an in-process buffer;
+        draining it right after we touch a page lets us attach the exact file and
+        page. These are NON-FATAL — MuPDF recovers and extraction/rendering
+        continues — so they log at WARNING for traceability, not as errors.
+        """
+        try:
+            import fitz
+
+            messages = fitz.TOOLS.mupdf_warnings(reset=True)
+        except Exception:
+            return
+        if not messages:
+            return
+        where = Path(filepath).name
+        if page_number is not None:
+            where = f"{where} page={page_number}"
+        for line in messages.splitlines():
+            line = line.strip()
+            if line:
+                logger.warning("MuPDF issue in %s: %s (non-fatal, recovered)", where, line)
+
     def _extract_native_text_pages(self, filepath: str) -> list[str]:
         """Extract native text with pypdf, then fill weak pages with pdfplumber text."""
         import pypdf
@@ -609,6 +637,8 @@ class PDFProcessor:
                             "source": "full_page",
                         }
                     ]
+                    # Attribute any MuPDF content-stream warnings to this page.
+                    self._log_mupdf_warnings(filepath, page_index + 1)
         except Exception as exc:
             logger.warning("Unable to render pages for OCR: %s", exc)
 
@@ -752,9 +782,12 @@ class PDFProcessor:
                 pix = document[page_number - 1].get_pixmap(
                     matrix=fitz.Matrix(scale, scale), alpha=False
                 )
-                return pix.tobytes("png")
+                png = pix.tobytes("png")
+                self._log_mupdf_warnings(filepath, page_number)
+                return png
         except Exception as exc:
-            logger.warning("Failed to render page %s: %s", page_number, exc)
+            logger.warning("Failed to render page %s of %s: %s",
+                           page_number, Path(filepath).name, exc)
             return None
 
     def chart_region_images(self, filepath: str, page_number: int, scale: Optional[float] = None) -> List[bytes]:
@@ -781,14 +814,18 @@ class PDFProcessor:
                 matrix = fitz.Matrix(scale, scale)
                 regions = self._cluster_drawing_regions(page)
                 if len(regions) < 2:
-                    return [page.get_pixmap(matrix=matrix, alpha=False).tobytes("png")]
+                    png = page.get_pixmap(matrix=matrix, alpha=False).tobytes("png")
+                    self._log_mupdf_warnings(filepath, page_number)
+                    return [png]
                 images: List[bytes] = []
                 for rect in regions:
                     pix = page.get_pixmap(matrix=matrix, clip=rect, alpha=False)
                     images.append(pix.tobytes("png"))
+                self._log_mupdf_warnings(filepath, page_number)
                 return images
         except Exception as exc:
-            logger.warning("chart_region_images failed page %s: %s", page_number, exc)
+            logger.warning("chart_region_images failed page %s of %s: %s",
+                           page_number, Path(filepath).name, exc)
             return []
 
     @staticmethod
