@@ -83,7 +83,7 @@ services:
       # truncated to the window instead of 500'ing "input exceeds context length"
       # and forcing a retry-split. The client already sends the right field
       # ("input" vs "prompt") based on this path.
-      - OLLAMA_EMBEDDINGS_PATH=/api/embeddings
+      - OLLAMA_EMBEDDINGS_PATH=/api/embed
       - OLLAMA_EMBEDDING_MODEL=bge-m3
       - OLLAMA_TIMEOUT_SECONDS=600
       - OLLAMA_NUM_CTX=4096

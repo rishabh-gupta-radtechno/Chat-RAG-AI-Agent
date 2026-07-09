@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     # Render scale for chart images sent to the vision model (1.0 = 72 DPI).
     # Higher sharpens small pie/bar labels (better/more complete extraction) but
     # costs memory per page; raise to 3.0 if the host has RAM and labels are dense.
-    chart_render_scale: float = 2.0
+    chart_render_scale: float = 1.5
     ocr_confidence_threshold: float = 0.6
     ocr_full_page: bool = True
     ocr_full_page_min_text_chars: int = 80
