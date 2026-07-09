@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: Optional[str] = None
+    # Upsert is sub-batched to this many points per request. A whole document (or
+    # even one page-window) can be hundreds of points, each carrying full
+    # chunk_text in its payload; sending them all in one request can overrun
+    # Qdrant's payload/time limits and drop the connection (ResponseHandling
+    # ReadError). Small, bounded requests avoid that and let a transient failure
+    # retry cheaply.
+    qdrant_upsert_batch_size: int = 64
+    qdrant_timeout_seconds: float = 60.0    # per-request client timeout
+    qdrant_upsert_max_retries: int = 3      # retry a dropped upsert this many times
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"

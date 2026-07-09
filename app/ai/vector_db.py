@@ -30,6 +30,7 @@ class VectorDBClient:
         self.client = AsyncQdrantClient(
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key or None,
+            timeout=settings.qdrant_timeout_seconds,
         )
         self.collection_name = "documents"
         self.vector_size = settings.embedding_dimension
@@ -114,17 +115,54 @@ class VectorDBClient:
                 logger.warning("No valid points to upsert")
                 return True
 
-            await self.client.upsert(
-                collection_name=self.collection_name,
-                points=points,
-            )
+            # Sub-batch so no single request carries too large a payload (full
+            # chunk_text per point). A big request can overrun Qdrant's limits and
+            # drop the connection — the ResponseHandling ReadError('') we saw kill
+            # a whole document mid-upsert.
+            batch_size = max(1, settings.qdrant_upsert_batch_size)
+            for start in range(0, len(points), batch_size):
+                batch = points[start : start + batch_size]
+                await self._upsert_batch_with_retry(batch, start)
 
             logger.info(f"Upserted {len(points)} vectors")
             return True
 
         except Exception as e:
-            logger.error(f"Error upserting vectors: {e}")
+            # repr() because ReadError/timeout exceptions often have an empty str()
+            # (the old log printed "Error upserting vectors:" with nothing after).
+            logger.exception("Error upserting vectors (%s points): %r", len(vectors), e)
             raise
+
+    async def _upsert_batch_with_retry(self, batch: list, offset: int) -> None:
+        """Upsert one sub-batch, retrying a dropped connection a few times.
+
+        A transient ``ResponseHandlingException(ReadError(''))`` (connection
+        dropped mid-request) is worth retrying with a short backoff; a persistent
+        one re-raises so the caller/summary records the real failure and page.
+        """
+        import asyncio
+
+        attempts = max(1, settings.qdrant_upsert_max_retries)
+        for attempt in range(1, attempts + 1):
+            try:
+                await self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=batch,
+                )
+                return
+            except Exception as e:
+                if attempt >= attempts:
+                    logger.error(
+                        "Upsert sub-batch failed permanently (points %s-%s, attempt %s/%s): %r",
+                        offset, offset + len(batch) - 1, attempt, attempts, e,
+                    )
+                    raise
+                backoff = 0.5 * attempt
+                logger.warning(
+                    "Upsert sub-batch failed (points %s-%s, attempt %s/%s): %r; retrying in %.1fs",
+                    offset, offset + len(batch) - 1, attempt, attempts, e, backoff,
+                )
+                await asyncio.sleep(backoff)
 
     async def search(
         self,

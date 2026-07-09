@@ -78,6 +78,11 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_CHAT_MODEL=qwen3:8b
+      # Use the modern /api/embed endpoint: unlike the legacy /api/embeddings, it
+      # honors options.num_ctx (8192) and truncate=true, so a long table chunk is
+      # truncated to the window instead of 500'ing "input exceeds context length"
+      # and forcing a retry-split. The client already sends the right field
+      # ("input" vs "prompt") based on this path.
       - OLLAMA_EMBEDDINGS_PATH=/api/embeddings
       - OLLAMA_EMBEDDING_MODEL=bge-m3
       - OLLAMA_TIMEOUT_SECONDS=600
