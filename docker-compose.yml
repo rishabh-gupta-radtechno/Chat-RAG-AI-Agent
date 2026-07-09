@@ -47,6 +47,15 @@ services:
       - ollama_data:/root/.ollama
     environment:
       OLLAMA_HOST: 0.0.0.0:11434
+      # Keep only ONE model resident at a time. Ingestion runs vision as one phase
+      # and embedding as a later phase (they don't overlap), and chat isn't used
+      # during a sync — so holding qwen2.5vl + bge-m3 + qwen3 together only starves
+      # the host RAM and gets the vision runner OOM-killed ("unexpected EOF").
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      # Unload a model promptly once a phase finishes, freeing RAM for the next.
+      OLLAMA_KEEP_ALIVE: "30s"
+      # One request at a time — bounds KV-cache memory (a big image balloons it).
+      OLLAMA_NUM_PARALLEL: "1"
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s
