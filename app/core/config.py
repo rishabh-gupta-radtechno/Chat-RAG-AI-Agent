@@ -187,14 +187,24 @@ class Settings(BaseSettings):
     # 200 DPI keeps manual text/tables OCR-readable while roughly halving the
     # render's peak memory vs 300 DPI (raise it if the host has ample RAM).
     ocr_full_page_dpi: int = 300
-    enable_bm25_search: bool = False
-    enable_reranking: bool = False
+    # Hybrid retrieval. Dense-only search misses exact-token lookups (a specific
+    # part/wagon/code that is one row inside a big multi-row table, whose averaged
+    # embedding ranks low). BM25 recalls those by exact tokens; the cross-encoder
+    # reranker then reorders the merged candidates by true query relevance.
+    enable_bm25_search: bool = True
+    enable_reranking: bool = True
     rerank_top_k: int = 10
+    # BM25 index is built from the whole collection; cache it this long instead of
+    # rebuilding per query. Invalidated immediately when a document is embedded, so
+    # freshly-synced content is searchable right away (see invalidate_bm25_cache).
+    bm25_cache_ttl_seconds: int = 600
     embedding_model_local: str = "paraphrase-multilingual-mpnet-base-v2"
     use_local_embeddings: bool = False
 
     # RAG
-    vector_search_top_k: int = 8
+    # Dense candidate pool. Wider than before so the reranker (and BM25 merge) have
+    # enough true candidates to surface a specific row from a big table.
+    vector_search_top_k: int = 12
     similarity_threshold: float = 0.5
     retrieval_neighbor_pages: int = 1
     rag_context_docs: int = 6

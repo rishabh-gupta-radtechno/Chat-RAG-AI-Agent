@@ -19,6 +19,14 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
+# RAGPipeline is constructed per request, so these are shared at module scope: the
+# cross-encoder loads ONCE (not per query) and the BM25 index is built once and
+# reused. _BM25_CACHE maps a user key -> {built_at, bm25, docs}; it is TTL-bounded
+# and invalidated the moment a document is embedded (invalidate_bm25_cache).
+_RERANKER_SINGLETON = None
+_RERANKER_FAILED = False
+_BM25_CACHE: dict = {}
+
 
 class RAGPipeline:
     """RAG pipeline for document retrieval and processing."""
@@ -46,27 +54,46 @@ class RAGPipeline:
             logger.info("RAG pipeline initialized")
 
     def _initialize_bm25(self):
-        """Initialize BM25 index."""
+        """Verify BM25 is available; the index itself is built lazily + cached."""
         try:
-            from rank_bm25 import BM25Okapi
-            # For now, BM25 will be built on retrieval if needed
+            from rank_bm25 import BM25Okapi  # noqa: F401
             logger.info("BM25 search enabled")
         except ImportError:
             logger.warning("rank_bm25 not installed, BM25 search disabled")
             settings.enable_bm25_search = False
 
     def _initialize_reranker(self):
-        """Initialize cross-encoder reranker."""
+        """Load the cross-encoder ONCE and share it across per-request pipelines."""
+        global _RERANKER_SINGLETON, _RERANKER_FAILED
+        if _RERANKER_FAILED:
+            settings.enable_reranking = False
+            return
+        if _RERANKER_SINGLETON is not None:
+            self._reranker = _RERANKER_SINGLETON
+            return
         try:
             from sentence_transformers import CrossEncoder
             from app.core.device import torch_device
-            self._reranker = CrossEncoder(
+            _RERANKER_SINGLETON = CrossEncoder(
                 'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', device=torch_device()
             )
-            logger.info("Reranking enabled")
+            self._reranker = _RERANKER_SINGLETON
+            logger.info("Reranking enabled (cross-encoder loaded once, shared)")
         except ImportError:
+            _RERANKER_FAILED = True
             logger.warning("sentence-transformers not installed, reranking disabled")
             settings.enable_reranking = False
+        except Exception as exc:
+            _RERANKER_FAILED = True
+            logger.warning("Reranker failed to load (%s); reranking disabled", exc)
+            settings.enable_reranking = False
+
+    @staticmethod
+    def invalidate_bm25_cache() -> None:
+        """Drop the cached BM25 index so freshly-embedded content is searchable."""
+        if _BM25_CACHE:
+            _BM25_CACHE.clear()
+            logger.info("BM25 cache invalidated (documents changed)")
 
     async def process_document(
         self,
@@ -174,6 +201,11 @@ class RAGPipeline:
                         win_start, win_end, filename, len(vectors), total_vectors,
                     )
                 progress["stage"] = "embedding"
+
+            # New content is now in the collection — drop the BM25 index so the
+            # next query rebuilds it and can find this document.
+            if total_vectors:
+                self.invalidate_bm25_cache()
 
             progress["stage"] = "done"
             self._log_document_summary(
@@ -527,31 +559,59 @@ class RAGPipeline:
 
         return semantic_documents, bm25_documents, keyword_documents, None
 
+    @staticmethod
+    def _bm25_tokenize(text: str) -> list[str]:
+        """Lowercased alphanumeric tokens for BM25.
+
+        Better than str.split() for lookups: case-insensitive ('BOXNEL' matches
+        'boxnel') and it breaks glued tokens like '70/85' into '70','85' so a
+        query for a specific value hits the row that contains it.
+        """
+        return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+    async def _get_bm25_index(self, user_id: Optional[uuid.UUID]):
+        """Return a cached ``(bm25, docs)`` for the corpus, rebuilding only when the
+        cache is stale (TTL) or was invalidated by a new document embedding."""
+        from rank_bm25 import BM25Okapi
+
+        key = str(user_id) if user_id else "__all__"
+        entry = _BM25_CACHE.get(key)
+        if entry and (time.time() - entry["built_at"]) < settings.bm25_cache_ttl_seconds:
+            return entry["bm25"], entry["docs"]
+
+        docs = await self.vector_db._get_all_documents(
+            user_id=str(user_id) if user_id else None
+        )
+        # Diagram/chart-image pointers carry no lexical text worth indexing.
+        docs = [d for d in docs if d.get("content_type") not in ("diagram", "chart_image")]
+        tokenized = [self._bm25_tokenize(d.get("chunk_text", "")) for d in docs]
+        bm25 = BM25Okapi(tokenized) if tokenized else None
+        _BM25_CACHE[key] = {"built_at": time.time(), "bm25": bm25, "docs": docs}
+        logger.info(
+            "BM25 index built key=%s docs=%s (cached %ss)",
+            key, len(docs), settings.bm25_cache_ttl_seconds,
+        )
+        return bm25, docs
+
     async def _bm25_search(
         self,
         query: str,
         limit: int,
         user_id: Optional[uuid.UUID] = None,
     ) -> list[dict]:
-        """Perform BM25 search on stored documents."""
+        """Perform BM25 search over the cached corpus index."""
         try:
-            from rank_bm25 import BM25Okapi
-            # For simplicity, build BM25 on all documents (in production, cache this)
-            all_docs = await self.vector_db._get_all_documents(
-                user_id=str(user_id) if user_id else None
-            )
-            corpus = [doc.get("chunk_text", "") for doc in all_docs]
-            tokenized_corpus = [doc.split() for doc in corpus]
-            bm25 = BM25Okapi(tokenized_corpus)
-            tokenized_query = query.split()
-            scores = bm25.get_scores(tokenized_query)
+            from rank_bm25 import BM25Okapi  # noqa: F401
+        except ImportError:
+            return []
+        try:
+            bm25, docs = await self._get_bm25_index(user_id)
+            if bm25 is None or not docs:
+                return []
+            scores = bm25.get_scores(self._bm25_tokenize(query))
             top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:limit]
             return [
-                {
-                    "id": all_docs[i]["id"],
-                    "relevance_score": scores[i],
-                    **all_docs[i],
-                }
+                {"id": docs[i]["id"], "relevance_score": float(scores[i]), **docs[i]}
                 for i in top_indices if scores[i] > 0
             ]
         except Exception as e:
