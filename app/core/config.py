@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # Cap response length. -1 = unbounded, which on CPU lets a reasoning model run
     # for thousands of tokens and blow past the request timeout; bound it instead.
     ollama_num_predict: int = 1024
+    # Tighter cap for concise factual/lookup answers (single value, count, or one
+    # table cell). Keeps a local model from mirroring the whole retrieved table
+    # back when the question only wants one field.
+    ollama_num_predict_concise: int = 256
     # qwen3 / deepseek-r1 etc. emit a hidden <think> reasoning block before the
     # answer — slow on CPU. False disables it for much faster RAG answers (the
     # visible answer is unchanged). Only set True for a thinking model when you

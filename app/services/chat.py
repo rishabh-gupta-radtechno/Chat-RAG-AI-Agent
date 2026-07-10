@@ -309,6 +309,55 @@ Question:
             history_lines.append(f"Assistant: {turn.answer}")
         history_text = "\n".join(history_lines) if history_lines else "No previous conversation."
 
+        # A factual lookup / count question wants a single value back, not the
+        # parts table it was pulled from. Local models (qwen3:8b) tend to mirror
+        # whatever they see in context, so give these a short, strict prompt AND a
+        # hard output cap — the cap is what actually stops a full-table dump when
+        # the model ignores the instruction.
+        #
+        # The cap is applied ONLY when the evidence points at a single source
+        # manual (_confident_single_source). When several manuals could each
+        # answer, we fall through to the detailed, uncapped prompt so the answer
+        # can give each manual's value with its own reference instead of being
+        # truncated after the first one.
+        if not self._wants_detailed_answer(message) and self._confident_single_source(documents):
+            prompt = f"""Answer the user's latest message using ONLY the retrieved context.
+Give ONLY the specific fact asked for — the exact value, number, name, count, or single table cell — using as few words as possible (aim for well under 300 characters). Do not restate the question or add a preamble.
+Reproduce every value EXACTLY as written in the context (numbers, part/item/identification numbers, labels, units); never round, convert, drop, or invent a value.
+Do NOT reproduce tables. Do NOT list other rows, parts, or components the question did not ask about. Do NOT add background, assembly steps, or a bill of materials.
+Cite the page, and the table name or section when the source is labelled with one, e.g. (table "Page 38 table 2", page 38).
+If the specific detail is not present in the context, say plainly that the documents do not specify it. Do not use outside knowledge.
+Respond in the same language the user used; keep English technical terms, abbreviations, measurements, and numbers exactly as written.
+For a follow-up, resolve references like 'it' or 'that part' to the subject established earlier in the conversation.
+
+Recent conversation:
+{history_text}
+
+Latest user message:
+{message}
+
+Retrieved context:
+{context}
+
+Related diagrams:
+{diagram_context}"""
+
+            answer = await self.llm_client.generate(
+                prompt,
+                system="You are a careful RAG assistant. Answer the exact question asked in one short sentence using only the retrieved context. Do not reproduce tables or list unrelated parts. Do not invent facts.",
+                temperature=0.2,
+                top_p=0.9,
+                num_predict=settings.ollama_num_predict_concise,
+            )
+
+            if self._contains_devanagari(message) and not self._contains_devanagari(answer):
+                answer = await self._localize_answer(message, answer)
+
+            return {
+                "answer": answer,
+                "thinking": f"Used {min(len(documents), settings.rag_context_docs)} of {len(documents)} retrieved document chunks, {len(diagrams)} related diagrams, and {len(history)} prior turns (concise lookup).",
+            }
+
         prompt = f"""Answer the user's latest message using the retrieved context and recent conversation.
 Respond in the same language the user used. If the user wrote in Hindi, answer in Hindi (Devanagari script) and keep any English technical terms, abbreviations, measurements, and numbers from the source exactly as written.
 For a follow-up, resolve references like 'it', 'that', or 'the above part' to the specific subject established earlier in the conversation, and answer about THAT subject. Use only the source(s) that describe that subject; if the retrieved sources are about a different device or manual, say the documents do not cover it rather than answering from an unrelated source.
@@ -473,6 +522,69 @@ Answer:
         """True when the question asks for a measurable value rather than a description."""
         return bool(cls._VALUE_NOUN_RE.search(message or ""))
 
+    # Single-answer lookups: a count ("how many bolts"), a quantity ("how much
+    # clearance"), or one field pulled from a parts table ("what is the
+    # Identification No. for X", "the description for Greysham Item No Y"). These
+    # want ONE value back, not the table they came from — even when a procedural
+    # stem such as "assembly" happens to appear in the sentence ("...required for
+    # the assembly?"), which would otherwise be misread as a procedure request.
+    _LOOKUP_RE = re.compile(
+        r"\bhow\s+many\b|\bhow\s+much\b"
+        r"|\b(identification|item|part|greysham|drawing|reference|serial|catalogue|catalog)\s*"
+        r"(no\.?|number|code)\b"
+        r"|\bpart\s*(no\.?|number)\b"
+        r"|\bdescription\s+(for|of)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_lookup_question(cls, message: str) -> bool:
+        """True for a single-value count/quantity or table-field lookup question."""
+        return bool(cls._LOOKUP_RE.search(message or ""))
+
+    # An explicit request to SEE a table or a full listing ("list all the parts",
+    # "show me the full table", "give the complete spare parts list", "bill of
+    # materials"). This is a deliberate ask for the whole table, so it must never
+    # be truncated to a one-line answer — it outranks the lookup/concise rule
+    # below. A bare mention of "table" is intentionally NOT enough (e.g. "in the
+    # table ... what is the Identification No. for X" is still a one-cell lookup).
+    _TABLE_LIST_RE = re.compile(
+        # Imperative verb "list ..." only (NOT the noun in "spare parts list"),
+        # recognised by the determiner/quantifier that follows it.
+        r"\blist\s+(?:all|the|out|down|every|each|of|me)\b"
+        r"|\ball\s+(?:the\s+|of\s+the\s+)?(?:parts|items|components|rows|entries|spare\s+parts)\b"
+        r"|\bevery\s+(?:part|item|component|row)\b"
+        r"|\b(?:full|complete|entire|whole)\s+(?:spare\s+)?(?:parts?\s+)?(?:table|list|bill)\b"
+        r"|\bbill\s+of\s+materials\b"
+        r"|\b(?:show|give|display|provide)\s+(?:me\s+|us\s+)?(?:a\s+|the\s+)?"
+        r"(?:full\s+|complete\s+|entire\s+|whole\s+)?(?:spare\s+)?(?:parts?\s+)?(?:table|list)\b"
+        r"|\bwhat\s+are\s+all\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _wants_table_or_list(cls, message: str) -> bool:
+        """True when the user explicitly asks to see a table or full listing."""
+        return bool(cls._TABLE_LIST_RE.search(message or ""))
+
+    @classmethod
+    def _wants_detailed_answer(cls, message: str) -> bool:
+        """True when the question warrants a full multi-line / table / step answer.
+
+        Priority order:
+        1. An explicit "show me the table / list everything" request always wins —
+           the user asked to see the whole table, so never truncate it.
+        2. A single-value count or field lookup is concise, even if it shares a
+           keyword with the descriptive/procedural classes (e.g. "assembly").
+        3. Otherwise, only genuinely descriptive ("how does X work", "principle of
+           operation") or procedural ("how to dismantle") questions want detail.
+        """
+        if cls._wants_table_or_list(message):
+            return True
+        if cls._is_lookup_question(message):
+            return False
+        return cls._is_descriptive_question(message) or ReActAgent._is_procedural_question(message)
+
     def _extract_direct_answer(self, message: str, documents: list[dict], diagrams: list[dict]) -> str:
         query_terms = self._important_terms(message)
         if not query_terms:
@@ -583,6 +695,34 @@ Answer:
     @staticmethod
     def _normalize_text(text: str) -> str:
         return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+    @staticmethod
+    def _confident_single_source(documents: list[dict], score_ratio: float = 0.75) -> bool:
+        """True when the retrieved evidence clearly points at ONE source manual.
+
+        Gates the concise answer cap. If two or more manuals score comparably —
+        each could hold the answer — this returns False so the answer takes the
+        uncapped detailed path and can present each manual's value with its own
+        reference, rather than being truncated after the first source.
+
+        "Comparable" means within ``score_ratio`` of the top relevance score, so a
+        weak incidental match in another manual does not force the detailed path.
+        """
+        scored = [
+            (str(doc.get("filename") or ""), float(doc.get("relevance_score") or 0.0))
+            for doc in documents
+            if doc.get("filename")
+        ]
+        if not scored:
+            return False
+        top = max(score for _, score in scored)
+        if top <= 0:
+            # No usable relevance scores — treat an ambiguous multi-manual
+            # retrieval as multi-source (no cap) by falling back to file count.
+            return len({filename for filename, _ in scored}) <= 1
+        cutoff = top * score_ratio
+        strong_sources = {filename for filename, score in scored if score >= cutoff}
+        return len(strong_sources) <= 1
 
     @staticmethod
     def _source_page_summary(documents: list[dict]) -> str:
