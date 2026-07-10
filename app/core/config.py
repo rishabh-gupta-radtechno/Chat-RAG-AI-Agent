@@ -83,10 +83,14 @@ class Settings(BaseSettings):
     # large enough to keep a procedure/step coherent.
     pdf_chunk_size: int = 250
     pdf_chunk_overlap: int = 20
-    # Max table rows per chunk; large tables split into batches, header repeated.
-    # Acts only as an upper bound now — the real driver is the token budget below,
-    # so a wide table splits before it can overflow the embedding context.
-    table_rows_per_chunk: int = 15
+    # Max table rows per chunk; large tables split into batches, header repeated
+    # (no rows are dropped — a longer table just spans more chunks). Kept small so
+    # a big reference/lookup table becomes several focused chunks instead of one
+    # ~5KB block: this keeps each row's embedding signal from being diluted AND
+    # keeps a chunk within the cross-encoder reranker's ~512-token window, so a
+    # query for one specific row (e.g. a single wagon/publication) can actually
+    # surface it. The token budget below is still the hard cap.
+    table_rows_per_chunk: int = 6
     # Reject an "extracted table" whose text is >= this % similar to the page's
     # prose — it's a false-positive table (paragraphs reformatted into cells).
     table_vs_text_similarity_threshold: int = 85
@@ -209,6 +213,11 @@ class Settings(BaseSettings):
     retrieval_neighbor_pages: int = 1
     rag_context_docs: int = 6
     rag_context_max_chars: int = 8000
+    # After generation, verify the answer's words actually overlap the retrieved
+    # context; if not, replace it with a "not found" response instead of returning
+    # an ungrounded/hallucinated answer. Toggle off if it rejects good answers
+    # (e.g. heavily numeric/tabular answers with little word overlap).
+    enable_grounding_check: bool = True
 
     # Logging
     log_level: str = "INFO"

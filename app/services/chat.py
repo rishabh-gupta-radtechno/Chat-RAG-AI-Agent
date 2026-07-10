@@ -392,10 +392,17 @@ Related diagrams:
             top_p=0.9,
         )
 
-        # Grounding check temporarily disabled — use retrieval score logs to diagnose quality
-        # if not self._validate_answer_grounding(answer, documents):
-        #     logger.warning("Answer not grounded in retrieved documents")
-        #     answer = self._not_found_answer(message)
+        # Grounding guard: if the generated answer's words don't overlap the
+        # retrieved context, it's likely a hallucination — return "not found"
+        # rather than a confident wrong answer. Logged so a false rejection is
+        # diagnosable; toggle via settings.enable_grounding_check.
+        if settings.enable_grounding_check and not self._validate_answer_grounding(answer, documents):
+            logger.warning(
+                "Answer failed grounding check (low overlap with retrieved context); "
+                "replacing with not-found. query=%r answer_preview=%r",
+                message[:120], answer[:160],
+            )
+            answer = self._not_found_answer(message)
 
         if self._contains_devanagari(message) and not self._contains_devanagari(answer):
             # Model ignored the language instruction — translate as fallback
