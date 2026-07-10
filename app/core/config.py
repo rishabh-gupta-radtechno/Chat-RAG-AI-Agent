@@ -174,10 +174,13 @@ class Settings(BaseSettings):
     # Kept low because a simple pie chart can be only ~2 drawing ops; other signals
     # (large raster, chart-like %/number text) also flag candidates.
     chart_candidate_min_drawings: int = 6
-    # Render scale for chart images sent to the vision model (1.0 = 72 DPI).
-    # Higher sharpens small pie/bar labels (better/more complete extraction) but
-    # costs memory per page; raise to 3.0 if the host has RAM and labels are dense.
-    chart_render_scale: float = 2
+    # Render scale for chart/table images sent to the vision model (1.0 = 72 DPI).
+    # Higher sharpens small pie/bar labels but produces MORE image tokens and costs
+    # memory. At 2.0 a full page tokenized to ~4428 tokens and 400'd against the
+    # 4096 vision context ("exceeds the available context size"); 1.5 keeps a page
+    # to ~2500 tokens (fits with margin) and lowers per-call memory. Raise only if
+    # the host has RAM AND the vision context (OLLAMA_NUM_CTX) is raised to match.
+    chart_render_scale: float = 1.5
     ocr_confidence_threshold: float = 0.6
     ocr_full_page: bool = True
     ocr_full_page_min_text_chars: int = 80
