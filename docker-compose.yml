@@ -3,6 +3,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: chat-rag-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -23,6 +24,7 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: chat-rag-qdrant
+    restart: unless-stopped
     ports:
       - "6333:6333"
     volumes:
@@ -41,6 +43,7 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: chat-rag-ollama
+    restart: unless-stopped
     ports:
       - "11434:11434"
     volumes:
@@ -70,6 +73,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: chat-rag-api
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
@@ -134,6 +138,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: chat-rag-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
