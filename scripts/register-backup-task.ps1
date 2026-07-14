@@ -30,12 +30,17 @@ param(
     [string]$TaskPath   = '\ChatRagAiAgent\',
     [int]$DaysInterval  = 2,
     [datetime]$RunAt    = '23:00',
-    # Backup script this task will launch.
-    [string]$ScriptPath = (Join-Path $PSScriptRoot 'backup.ps1')
+    # Backup script this task will launch (resolved below if not set).
+    [string]$ScriptPath
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Resolve the script directory robustly ($PSScriptRoot can be empty inside a
+# param() default on some Windows PowerShell 5.1 hosts).
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $ScriptPath) { $ScriptPath = Join-Path $ScriptDir 'backup.ps1' }
 
 # --- Preconditions -------------------------------------------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal] `

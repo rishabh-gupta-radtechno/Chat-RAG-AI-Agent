@@ -37,8 +37,8 @@ param(
     # Name of the run folder (yyyyMMdd_HHmmss) under -BackupRoot.
     [string]$Timestamp,
 
-    # Root that holds the timestamped run folders.
-    [string]$BackupRoot = (Join-Path $PSScriptRoot '..\backups'),
+    # Root that holds the timestamped run folders (resolved below if not set).
+    [string]$BackupRoot,
 
     # Skip the interactive confirmation.
     [switch]$Force,
@@ -62,6 +62,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Resolve the script directory robustly ($PSScriptRoot can be empty inside a
+# param() default on some Windows PowerShell 5.1 hosts).
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $BackupRoot) { $BackupRoot = Join-Path $ScriptDir '..\backups' }
 
 # --------------------------------------------------------------------------
 # Resolve which backup folder to restore

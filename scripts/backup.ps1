@@ -24,7 +24,8 @@
 [CmdletBinding()]
 param(
     # Local root for backups (kept inside the repo tree, gitignored).
-    [string]$BackupRoot = (Join-Path $PSScriptRoot '..\backups'),
+    # Resolved below if not supplied (see $PSScriptRoot note).
+    [string]$BackupRoot,
 
     # Retention window in days (task requirement #4).
     [int]$RetentionDays = 30,
@@ -41,6 +42,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Resolve the script directory robustly. On some Windows PowerShell 5.1 hosts
+# $PSScriptRoot is empty inside a param() default, which broke Join-Path; use a
+# fallback and compute the default here instead.
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $BackupRoot) { $BackupRoot = Join-Path $ScriptDir '..\backups' }
 
 # --------------------------------------------------------------------------
 # Paths & logging
