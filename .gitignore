@@ -57,3 +57,6 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+
+# Backups (created by scripts/backup.ps1)
+backups/
