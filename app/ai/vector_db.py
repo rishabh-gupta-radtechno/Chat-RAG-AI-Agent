@@ -266,12 +266,29 @@ class VectorDBClient:
         limit: int = 20,
         user_id: Optional[str] = None,
     ) -> list[dict]:
-        """Return all chunks whose section_number matches exactly (e.g. '3.6').
+        """Return all chunks belonging to a named section (e.g. '3.6' or 'A').
 
-        Lets a query that names a section retrieve that whole section by metadata,
-        independent of embedding/keyword similarity.
+        Lets a query that names a section retrieve that whole section, independent
+        of embedding/keyword similarity. Two matchers are combined:
+
+          1. ``section_number`` metadata exact match — for sections the ingest
+             detector tagged (typically numeric headings like "3.6").
+          2. A ``chunk_text`` heading scan — for sections the detector missed. Slide
+             decks label sections alphabetically ("Section A", "SECTION B") which the
+             numeric detector skips, so those carry no ``section_number`` metadata;
+             this catches them by their heading line without any re-ingestion.
         """
         try:
+            results: list[dict] = []
+            seen: set = set()
+
+            def add(point):
+                if point.id in seen:
+                    return
+                seen.add(point.id)
+                results.append({"id": point.id, "relevance_score": 0.0, **(point.payload or {})})
+
+            # (1) Metadata exact match.
             must = [
                 FieldCondition(key="section_number", match=MatchValue(value=str(section_number)))
             ]
@@ -279,7 +296,6 @@ class VectorDBClient:
                 must.append(FieldCondition(key="user_id", match=MatchValue(value=str(user_id))))
             section_filter = Filter(must=must)
 
-            results: list[dict] = []
             offset = None
             while True:
                 points, offset = await self.client.scroll(
@@ -291,10 +307,35 @@ class VectorDBClient:
                     with_vectors=False,
                 )
                 for point in points:
-                    payload = point.payload or {}
-                    results.append({"id": point.id, "relevance_score": 0.0, **payload})
+                    add(point)
                 if offset is None or len(results) >= limit:
                     break
+
+            # (2) Heading scan for sections with no section_number metadata. Match
+            # only a real heading line ("Section A ...") — not "section a" mid-prose
+            # — so the rescue stays precise. The (?!-\w) guard drops engineering-
+            # drawing cross-section labels ("SECTION A-A", "SECTION A-B"), which are
+            # drafting notation, not document sections. Skipped once (1) filled quota.
+            if len(results) < limit:
+                heading_re = re.compile(
+                    rf"(?im)^\s*(?:section|sec|clause)\s+{re.escape(str(section_number))}\b(?!-\w)"
+                )
+                offset = None
+                while True:
+                    points, offset = await self.client.scroll(
+                        collection_name=self.collection_name,
+                        limit=100,
+                        offset=offset,
+                        scroll_filter=self._user_filter(user_id),
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    for point in points:
+                        payload = point.payload or {}
+                        if heading_re.search(payload.get("chunk_text") or ""):
+                            add(point)
+                    if offset is None or len(results) >= limit:
+                        break
 
             logger.info(f"Found {len(results)} chunks in section {section_number}")
             return results[:limit]

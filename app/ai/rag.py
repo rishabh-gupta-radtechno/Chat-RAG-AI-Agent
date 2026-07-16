@@ -969,11 +969,15 @@ class RAGPipeline:
 
     @staticmethod
     def _section_reference(query: str) -> Optional[str]:
-        """Extract an explicit section number from a query.
+        """Extract an explicit section reference from a query.
 
-        e.g. "what is in section 3.6?" / "sec 3.6" / "clause 3.6" -> "3.6".
-        Requires a section keyword so plain numbers/measurements aren't treated
-        as section references.
+        e.g. "what is in section 3.6?" / "sec 3.6" / "clause 3.6" -> "3.6", and
+        "the Section A slide" / "Section B scope" -> "A" / "B". Requires a section
+        keyword so plain numbers/measurements aren't treated as section references.
+
+        Alpha labels are matched only for a capital single letter directly after
+        "section" (case-sensitive on the letter), so ordinary prose like
+        "section a valve is fitted" is not mistaken for a reference to section "A".
         """
         if not query:
             return None
@@ -982,7 +986,10 @@ class RAGPipeline:
             query,
             flags=re.IGNORECASE,
         )
-        return match.group(1) if match else None
+        if match:
+            return match.group(1)
+        alpha = re.search(r"\b[Ss]ection\s+([A-Z])\b", query)
+        return alpha.group(1) if alpha else None
 
     async def _embed(self, text: str) -> list[float]:
         """Embed one string via the configured backend (local ST model or Ollama).
