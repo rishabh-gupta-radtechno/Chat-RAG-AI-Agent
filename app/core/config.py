@@ -198,6 +198,13 @@ class Settings(BaseSettings):
     enable_bm25_search: bool = True
     enable_reranking: bool = True
     rerank_top_k: int = 10
+    # Reciprocal Rank Fusion damping. Larger flattens the head (rank 1 vs 2 matter
+    # less) and leans on cross-channel agreement; 60 is the standard published value.
+    rrf_k: int = 60
+    # How much the cross-encoder overrides rank fusion when reranking is enabled.
+    # 0 = ignore the reranker, 1 = trust it alone. 0.5 keeps fusion as a prior so one
+    # confidently-wrong rerank cannot bury a chunk every channel agreed on.
+    rerank_weight: float = 0.5
     # BM25 index is built from the whole collection; cache it this long instead of
     # rebuilding per query. Invalidated immediately when a document is embedded, so
     # freshly-synced content is searchable right away (see invalidate_bm25_cache).

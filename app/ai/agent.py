@@ -91,9 +91,14 @@ class ReActAgent:
 
             # For a table chunk, present the whole table as clean Markdown under
             # its caption — so the model can read any cell — and only once.
+            # Identity comes from table_id, not the caption: extracted tables are
+            # routinely captioned with the generic "Table", so keying on the title
+            # made every table on a page collide, and only the first one on it was
+            # ever rendered — the rest were dropped as "already seen" even though
+            # they were different tables holding different values.
             if content_type == "table" and doc.get("table_markdown"):
                 table_title = (doc.get("table_title") or "Table").strip()
-                table_key = (filename, page_number, table_title)
+                table_key = (filename, page_number, doc.get("table_id") or table_title)
                 if table_key in seen_tables:
                     continue
                 seen_tables.add(table_key)

@@ -27,6 +27,14 @@ _RERANKER_SINGLETON = None
 _RERANKER_FAILED = False
 _BM25_CACHE: dict = {}
 
+# Format/versioning noise carried by uploaded filenames; these say nothing about what
+# a document is about, and every file shares them, so they must not count as the
+# question naming a particular document (see _filename_affinity).
+_FILENAME_NOISE_TOKENS = frozenset({
+    "pdf", "ppt", "pptx", "doc", "docx", "xls", "xlsx", "final", "rev", "ver",
+    "version", "draft", "copy", "new", "old", "updated", "revised",
+})
+
 
 class RAGPipeline:
     """RAG pipeline for document retrieval and processing."""
@@ -471,11 +479,15 @@ class RAGPipeline:
             # bonus (content/section) numerically irrelevant. Scaling each channel to
             # its own max keeps within-channel ranking but makes cross-channel
             # combination and the bonuses meaningful.
-            self._normalize_channel_scores(semantic_documents)
-            self._normalize_channel_scores(bm25_documents)
-            self._normalize_channel_scores(keyword_documents)
+            fused = self._fuse_channels(
+                [semantic_documents, bm25_documents, keyword_documents]
+            )
 
-            # Combine and deduplicate
+            # Combine and deduplicate. A chunk may surface in several channels and
+            # also be a section/heading rescue; merge those views into ONE record
+            # that keeps every signal, instead of keeping whichever copy happened to
+            # score highest and discarding the rest.
+            query_terms = self.vector_db._keyword_terms(query)
             documents_by_id = {}
             for document in (
                 semantic_documents + bm25_documents + keyword_documents
@@ -489,17 +501,31 @@ class RAGPipeline:
                 # A table of contents / index page is navigation, never an answer.
                 if self._is_index_chunk(document):
                     continue
-                document_id = document.get("id")
+                document_id = str(document.get("id"))
+                # Rank-fusion score is a property of the chunk, not of the copy of it
+                # that a given channel returned. It is kept in its own field so the
+                # ranking score can be derived from it repeatedly without compounding:
+                # relevance_score is an OUTPUT (written once at the end of retrieval),
+                # never an input to the scoring.
+                document["fusion_score"] = fused.get(document_id, 0.0)
+                # Still published for downstream consumers (evidence gating); it is
+                # deliberately NOT part of the ranking score — the keyword channel
+                # already contributes its lexical judgement through the fusion, and
+                # adding it again double-counted lexical overlap and let a chunk that
+                # merely repeats the query's words outrank the one holding the answer.
                 document["lexical_score"] = self.vector_db._keyword_score(
-                    self.vector_db._keyword_terms(query),
-                    document.get("chunk_text", ""),
+                    query_terms, document.get("chunk_text", "")
+                )
+                document["filename_affinity"] = self._filename_affinity(
+                    document.get("filename", ""), query_terms
                 )
                 existing = documents_by_id.get(document_id)
-                if (
-                    existing is None
-                    or self._combined_retrieval_score(document) > self._combined_retrieval_score(existing)
-                ):
+                if existing is None:
                     documents_by_id[document_id] = document
+                    continue
+                for flag in ("section_match", "heading_match"):
+                    if document.get(flag):
+                        existing[flag] = True
 
             candidates = list(documents_by_id.values())
 
@@ -515,6 +541,15 @@ class RAGPipeline:
                 max_documents=settings.rag_context_docs + max(top_k, 6),
                 query=query,
             )
+
+            # Publish the ranking score once retrieval has settled. Callers (source
+            # ordering, evidence gating) read relevance_score, so it must reflect the
+            # order documents are actually returned in — a rescued chunk is highly
+            # relevant to the question even though rank fusion never saw it. Writing
+            # it here rather than inside the scorer keeps the scorer a pure function
+            # of fusion_score, so computing it twice can never compound.
+            for document in documents:
+                document["relevance_score"] = self._combined_retrieval_score(document)
 
             logger.info(f"Retrieved {len(documents)} documents after reranking")
             logger.info("Retrieval scores for query: %s", embed_text[:120])
@@ -762,9 +797,13 @@ class RAGPipeline:
                 raw_score = float(score)
                 documents[i]["rerank_raw_score"] = raw_score
                 documents[i]["rerank_score"] = 1.0 / (1.0 + math.exp(-raw_score))
-                documents[i]["relevance_score"] = self._combined_retrieval_score(documents[i])
 
-            documents.sort(key=lambda x: x["relevance_score"], reverse=True)
+            # relevance_score stays the fused 0..1 relevance of the chunk; the ranking
+            # score (which adds the rescue bonuses) is derived, not stored over it, so
+            # "how relevant is this chunk" and "where does it sort" remain separable —
+            # overwriting the former with the latter made a rescued chunk look like a
+            # 5.0-relevance match to every downstream consumer.
+            documents.sort(key=self._combined_retrieval_score, reverse=True)
             return documents[:top_k]
         except Exception as e:
             logger.warning(f"Reranking failed: {e}")
@@ -800,37 +839,108 @@ class RAGPipeline:
         return False
 
     @staticmethod
-    def _normalize_channel_scores(documents: list[dict]) -> None:
-        """Scale one channel's ``relevance_score`` to 0..1 in place (divide by max).
+    def _fuse_channels(channels: list[list[dict]]) -> dict[str, float]:
+        """Reciprocal Rank Fusion of the retrieval channels -> ``{doc_id: 0..1}``.
 
-        Divide-by-max (not min-max) preserves each score's ratio to the channel's
-        best hit and keeps a 0 at 0, so a weak hit stays weak instead of being
-        forced to the bottom. Cosine scores (already 0..1) are barely changed;
-        unbounded BM25 scores are brought onto the same scale so no single channel's
-        raw magnitude dominates the combined score.
+        The channels score on incompatible scales — cosine is 0..1, BM25 is an
+        unbounded term-frequency score, keyword is an ad-hoc 0..4 — so no arithmetic
+        on the raw values is meaningful. Rescaling each channel to its own maximum
+        does not fix it either: it pins every channel's best hit to exactly 1.0, so a
+        spurious top keyword match ties a genuine top semantic match and some
+        tie-breaker decides the answer.
+
+        RRF uses only each channel's RANK, which is the one thing the channels agree
+        on the meaning of, and sums 1/(k + rank). Its useful property is that
+        agreement compounds: a chunk placed well by several channels beats a chunk
+        that one channel loves and the others have never heard of — which is exactly
+        the signal wanted from a hybrid search. ``k`` damps the head so ranks 1 and 2
+        are not wildly far apart (60 is the standard value from the original paper).
+
+        The result is normalised by the best score attainable given how many channels
+        actually returned anything, so it stays absolute and comparable: 1.0 means
+        "ranked first in every channel that ran", ~0.33 means "ranked first in one of
+        three". Every other term in _combined_retrieval_score is anchored to this
+        0..1 scale.
         """
-        if not documents:
-            return
-        scores = [float(d.get("relevance_score") or 0.0) for d in documents]
-        hi = max(scores)
-        if hi <= 0:
-            return
-        for document, score in zip(documents, scores):
-            document["relevance_score"] = score / hi
+        k = max(1, settings.rrf_k)
+        active = [channel for channel in channels if channel]
+        if not active:
+            return {}
+
+        scores: dict[str, float] = {}
+        for channel in active:
+            for rank, document in enumerate(channel, start=1):
+                document_id = str(document.get("id"))
+                scores[document_id] = scores.get(document_id, 0.0) + 1.0 / (k + rank)
+
+        best_possible = len(active) * (1.0 / (k + 1))
+        return {
+            document_id: score / best_possible
+            for document_id, score in scores.items()
+        }
+
+    @staticmethod
+    def _filename_affinity(filename: str, query_terms: list[str]) -> float:
+        """0..1 — how much of the document's own NAME the question names back.
+
+        Manuals are near-duplicates of one another: five retrofitment decks carry a
+        byte-identical "Section A" slide, and every BMBS manual repeats the same
+        prose. When the text cannot separate them, the document the question actually
+        asked for usually can ("the Twin Pipe modification" -> PPT_ON_Twin_Pipe).
+        Chunk text never contains the filename, so no text-based channel can see this.
+
+        Deliberately a weak term: it breaks ties between otherwise equal chunks and
+        nudges the right manual up, but cannot by itself promote an irrelevant chunk.
+        """
+        tokens = {
+            token
+            for token in re.findall(r"[a-z0-9]+", (filename or "").lower())
+            if len(token) > 2 and token not in _FILENAME_NOISE_TOKENS
+        }
+        if not tokens:
+            return 0.0
+        return len(tokens & set(query_terms)) / len(tokens)
 
     @staticmethod
     def _combined_retrieval_score(document: dict) -> float:
-        lexical_score = float(document.get("lexical_score") or 0.0)
-        semantic_score = float(document.get("relevance_score") or 0.0)
+        """Final ranking score. Every term lives on one documented 0..1-anchored
+        scale, so the weights mean something and stay correct as channels change.
+
+            relevance  0..1    rank-fusion, optionally blended with the reranker
+          + content    0..0.2  mild preference between content types
+          + filename   0..0.15 the question naming the document itself
+          + rescue     0/1.5/2.0  an exact section/heading the user named
+          - penalty    0..0.3  navigation pages
+
+        Anything that is not a rescue therefore tops out at 1.35, which is what keeps
+        the rescue bonuses decisive by construction rather than by a magnitude picked
+        to win one example.
+        """
+        relevance = float(document.get("fusion_score") or 0.0)
         rerank_score = document.get("rerank_score")
 
+        # The cross-encoder reads the query and the chunk together, so where it has
+        # an opinion it is the better relevance estimate; fusion stays in the blend
+        # as a prior, since the reranker sees only a truncated chunk and can be
+        # confidently wrong. Previously this was max(fusion, rerank), which silently
+        # discarded the reranker whenever fusion scored higher — and when raw BM25
+        # values were still in this field, that was always.
         if rerank_score is not None:
-            semantic_score = max(semantic_score, float(rerank_score))
+            weight = min(max(settings.rerank_weight, 0.0), 1.0)
+            relevance = (1.0 - weight) * relevance + weight * float(rerank_score)
 
+        # A table is first-class evidence in these manuals, not a degraded copy of
+        # prose: limits, ratings and part dimensions exist ONLY in tables, and a
+        # retrieved table chunk is rendered to the model as its complete markdown
+        # (see ReActAgent._format_context) rather than as the partial row text that
+        # was embedded. Scoring it below prose contradicted that — it handed the slot
+        # to a manual that merely discusses the topic over the table holding the
+        # asked-for value. OCR text stays lower: it is the same content, read less
+        # reliably.
         content_bonus = {
             "text": 0.2,
+            "table": 0.2,
             "ocr": 0.1,
-            "table": 0.05,
             "diagram": 0.0,
         }.get(document.get("content_type"), 0.0)
 
@@ -838,19 +948,22 @@ class RAGPipeline:
             "toc": 0.3,
         }.get(document.get("page_type", "content"), 0.0)
 
+        filename_bonus = 0.15 * float(document.get("filename_affinity") or 0.0)
+
         # A section/heading the user typed verbatim is an authoritative signal: the
         # answer lives on that exact slide/section, which often has almost nothing to
-        # embed and cannot compete on semantic/lexical score alone (a bare "Section A"
-        # slide, a check-sheet table cell). These rescues fire ONLY when the query
-        # names a section ("Section A") or quotes an ALL-CAPS heading ("MUST CHANGE
-        # ITEMS"), so a dominant bonus is safe — queries that reference neither are
-        # untouched. The bonus must exceed the realistic non-rescue max (semantic 1.0
-        # ×2 + lexical + content ≈ 2.8). Exact section label outranks a heading phrase.
-        section_bonus = 5.0 if document.get("section_match") else 0.0
-        heading_bonus = 4.0 if document.get("heading_match") else 0.0
+        # embed and cannot compete on relevance alone (a bare "Section A" slide, a
+        # check-sheet cell). These rescues fire ONLY when the query names a section
+        # ("Section A") or quotes an ALL-CAPS heading ("MUST CHANGE ITEMS"), so making
+        # them decisive is safe — queries that reference neither never see them.
+        # Both exceed the 1.2 non-rescue ceiling by construction, so they are
+        # dominant by design rather than by a tuned magnitude; section (an exact
+        # label) outranks heading (a phrase that may appear in several documents).
+        section_bonus = 2.0 if document.get("section_match") else 0.0
+        heading_bonus = 1.5 if document.get("heading_match") else 0.0
 
         return (
-            (semantic_score * 2.0) + lexical_score + content_bonus
+            relevance + content_bonus + filename_bonus
             + section_bonus + heading_bonus - page_type_penalty
         )
 
