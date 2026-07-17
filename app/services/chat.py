@@ -164,6 +164,7 @@ class ChatService:
         r"^\s*(and|also|what about|then|so|ok|okay|but)\b",
         re.IGNORECASE,
     )
+    _DEVANAGARI_WORD_RE = re.compile(r"[ऀ-ॿ]+")
 
     @classmethod
     def _is_followup(cls, message: str) -> bool:
@@ -175,16 +176,23 @@ class ChatService:
         as "what is the principle of operation?" is NOT a follow-up, so its
         retrieval stays independent of the previous (possibly unrelated) topic and
         can land in any document.
+
+        _important_terms() only recognises [a-z0-9] words, so a Devanagari question
+        has near-zero "terms" by that count alone — every Hindi question, however
+        detailed and self-contained, would otherwise look like a bare anaphoric
+        follow-up and get the previous (possibly unrelated) turns spliced into its
+        retrieval query. Count Devanagari word runs alongside the ASCII terms so a
+        substantive Hindi question is recognised as self-contained too.
         """
         text = (message or "").strip()
         if not text:
             return False
-        terms = cls._important_terms(text)
-        if len(terms) <= 1:
+        content_term_count = len(cls._important_terms(text)) + len(cls._DEVANAGARI_WORD_RE.findall(text))
+        if content_term_count <= 1:
             return True
         if cls._CONTINUATION_RE.search(text):
             return True
-        if cls._ANAPHORA_RE.search(text) and len(terms) <= 3:
+        if cls._ANAPHORA_RE.search(text) and content_term_count <= 3:
             return True
         return False
 
