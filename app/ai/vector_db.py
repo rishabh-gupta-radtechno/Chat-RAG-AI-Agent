@@ -343,6 +343,55 @@ class VectorDBClient:
             logger.error(f"Error searching section {section_number}: {e}")
             return []
 
+    async def search_by_heading(
+        self,
+        phrase: str,
+        limit: int = 20,
+        user_id: Optional[str] = None,
+    ) -> list[dict]:
+        """Return chunks whose text contains PHRASE in its UPPERCASE form.
+
+        Matches case-sensitively (the uppercase spelling only), tolerant of the
+        whitespace between words. Presentations carry section/table headings in
+        capitals; manuals mention the same words in lowercase prose — so the
+        uppercase match selects the heading-bearing slide/table chunk that holds the
+        answer, not the manuals that merely discuss it. Diagram/chart-image pointers
+        (no lexical text) are skipped. No metadata or re-ingest required.
+        """
+        try:
+            tokens = re.findall(r"[A-Za-z0-9]+", phrase or "")
+            if len(tokens) < 2:
+                return []
+            heading_re = re.compile(
+                r"\b" + r"\s+".join(re.escape(t.upper()) for t in tokens) + r"\b"
+            )
+
+            results: list[dict] = []
+            offset = None
+            while True:
+                points, offset = await self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=100,
+                    offset=offset,
+                    scroll_filter=self._user_filter(user_id),
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    payload = point.payload or {}
+                    if payload.get("content_type") in ("diagram", "chart_image"):
+                        continue
+                    if heading_re.search(payload.get("chunk_text") or ""):
+                        results.append({"id": point.id, "relevance_score": 0.0, **payload})
+                if offset is None or len(results) >= limit:
+                    break
+
+            logger.info(f"Found {len(results)} chunks under heading '{phrase}'")
+            return results[:limit]
+        except Exception as e:
+            logger.error(f"Error searching heading '{phrase}': {e}")
+            return []
+
     async def _get_all_documents(self, user_id: Optional[str] = None) -> list[dict]:
         """Return all point payloads for lightweight lexical retrieval."""
         documents = []

@@ -445,9 +445,42 @@ class RAGPipeline:
                     document["section_match"] = True
                 logger.info("Section '%s' filter matched %d chunk(s)", section_ref, len(section_documents))
 
+            # Heading-scoped retrieval: when the query quotes an ALL-CAPS heading
+            # ("MUST CHANGE ITEMS") but not a numbered/lettered section, pull the
+            # chunks that carry that heading in uppercase — i.e. the slide/table it
+            # names — so a value living in a check-sheet cell is retrieved even though
+            # general manuals out-score it on the shared vocabulary. Section
+            # references take precedence (they are more specific).
+            heading_documents = []
+            heading_ref = None if section_ref else self._heading_reference(query)
+            if heading_ref:
+                heading_documents = await self.vector_db.search_by_heading(
+                    heading_ref,
+                    limit=top_k * 2,
+                    user_id=str(retrieval_user_id) if retrieval_user_id else None,
+                )
+                for document in heading_documents:
+                    document["heading_match"] = True
+                logger.info("Heading '%s' matched %d chunk(s)", heading_ref, len(heading_documents))
+
+            # Put every channel on a common 0..1 scale before combining. Semantic
+            # scores are cosine (0..1) but BM25 returns unbounded term-frequency
+            # scores (tens to hundreds); feeding those raw into
+            # _combined_retrieval_score let a single channel's magnitude dominate,
+            # which pinned relevance to raw BM25 and made the reranker and every
+            # bonus (content/section) numerically irrelevant. Scaling each channel to
+            # its own max keeps within-channel ranking but makes cross-channel
+            # combination and the bonuses meaningful.
+            self._normalize_channel_scores(semantic_documents)
+            self._normalize_channel_scores(bm25_documents)
+            self._normalize_channel_scores(keyword_documents)
+
             # Combine and deduplicate
             documents_by_id = {}
-            for document in semantic_documents + bm25_documents + keyword_documents + section_documents:
+            for document in (
+                semantic_documents + bm25_documents + keyword_documents
+                + section_documents + heading_documents
+            ):
                 # Diagram chunks (incl. scanned-page image pointers) are surfaced
                 # via the dedicated diagram path, not as text context — keep them
                 # out of text retrieval so they never occupy a context slot.
@@ -727,6 +760,25 @@ class RAGPipeline:
         return False
 
     @staticmethod
+    def _normalize_channel_scores(documents: list[dict]) -> None:
+        """Scale one channel's ``relevance_score`` to 0..1 in place (divide by max).
+
+        Divide-by-max (not min-max) preserves each score's ratio to the channel's
+        best hit and keeps a 0 at 0, so a weak hit stays weak instead of being
+        forced to the bottom. Cosine scores (already 0..1) are barely changed;
+        unbounded BM25 scores are brought onto the same scale so no single channel's
+        raw magnitude dominates the combined score.
+        """
+        if not documents:
+            return
+        scores = [float(d.get("relevance_score") or 0.0) for d in documents]
+        hi = max(scores)
+        if hi <= 0:
+            return
+        for document, score in zip(documents, scores):
+            document["relevance_score"] = score / hi
+
+    @staticmethod
     def _combined_retrieval_score(document: dict) -> float:
         lexical_score = float(document.get("lexical_score") or 0.0)
         semantic_score = float(document.get("relevance_score") or 0.0)
@@ -746,11 +798,21 @@ class RAGPipeline:
             "toc": 0.3,
         }.get(document.get("page_type", "content"), 0.0)
 
-        # An exact section-number match is the strongest signal for a query that
-        # explicitly asks for a section, so float it to the top.
-        section_bonus = 1.0 if document.get("section_match") else 0.0
+        # A section/heading the user typed verbatim is an authoritative signal: the
+        # answer lives on that exact slide/section, which often has almost nothing to
+        # embed and cannot compete on semantic/lexical score alone (a bare "Section A"
+        # slide, a check-sheet table cell). These rescues fire ONLY when the query
+        # names a section ("Section A") or quotes an ALL-CAPS heading ("MUST CHANGE
+        # ITEMS"), so a dominant bonus is safe — queries that reference neither are
+        # untouched. The bonus must exceed the realistic non-rescue max (semantic 1.0
+        # ×2 + lexical + content ≈ 2.8). Exact section label outranks a heading phrase.
+        section_bonus = 5.0 if document.get("section_match") else 0.0
+        heading_bonus = 4.0 if document.get("heading_match") else 0.0
 
-        return (semantic_score * 2.0) + lexical_score + content_bonus + section_bonus - page_type_penalty
+        return (
+            (semantic_score * 2.0) + lexical_score + content_bonus
+            + section_bonus + heading_bonus - page_type_penalty
+        )
 
     async def _refine_low_confidence_tables(
         self, filepath: str, page_documents: list, filename: str = ""
@@ -990,6 +1052,35 @@ class RAGPipeline:
             return match.group(1)
         alpha = re.search(r"\b[Ss]ection\s+([A-Z])\b", query)
         return alpha.group(1) if alpha else None
+
+    @staticmethod
+    def _heading_reference(query: str) -> Optional[str]:
+        """Extract an ALL-CAPS heading phrase the user quotes from a slide/table.
+
+        e.g. "the MUST CHANGE ITEMS section of the presentation" -> "MUST CHANGE
+        ITEMS". Presentations carry section/table headings in capitals, whereas
+        manuals mention the same words in lowercase prose — so matching the UPPERCASE
+        form of this phrase later selects the heading-bearing slide/table chunk that
+        actually holds the answer (a value in a check-sheet cell) over the manuals
+        that merely discuss the topic. Returns the longest run of >=2 consecutive
+        fully-uppercase alphabetic tokens (each >=2 chars), or None. Requiring >=2
+        tokens keeps lone acronyms (BMBS, POH) and ordinary words from triggering it.
+        """
+        if not query:
+            return None
+        best: list[str] = []
+        current: list[str] = []
+        for token in query.split():
+            core = re.sub(r"[^A-Za-z]", "", token)
+            if len(core) >= 2 and core.isupper():
+                current.append(core)
+            else:
+                if len(current) > len(best):
+                    best = current
+                current = []
+        if len(current) > len(best):
+            best = current
+        return " ".join(best) if len(best) >= 2 else None
 
     async def _embed(self, text: str) -> list[float]:
         """Embed one string via the configured backend (local ST model or Ollama).
