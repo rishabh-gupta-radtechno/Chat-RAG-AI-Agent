@@ -513,6 +513,7 @@ class RAGPipeline:
                 candidates[:top_k],
                 user_id=retrieval_user_id,
                 max_documents=settings.rag_context_docs + max(top_k, 6),
+                query=query,
             )
 
             logger.info(f"Retrieved {len(documents)} documents after reranking")
@@ -656,57 +657,96 @@ class RAGPipeline:
         documents: list[dict],
         user_id: Optional[uuid.UUID],
         max_documents: int,
+        query: str = "",
     ) -> list[dict]:
-        """Add nearby chunks from the same file/page to reduce missing-context answers."""
+        """Interleave each retrieved chunk with the best chunks from its own page.
+
+        A chunk frequently answers only half a question: a slide states the formula
+        ("X = 79 + Y") while the value it needs sits in the table beside it on the
+        same page. Such page-mates carry none of the query's wording, so they never
+        rank on their own and must be pulled in by adjacency (same file, within
+        +/-retrieval_neighbor_pages).
+
+        Two rules make them actually usable:
+          * They are emitted DIRECTLY AFTER the document they support, rather than
+            appended after every candidate. Only the first rag_context_docs documents
+            reach the LLM, and rag_context_docs (6) is smaller than the candidate
+            count (top_k), so tail-appended neighbours were always truncated away —
+            the pass scrolled the whole collection and then changed nothing.
+          * Within a page they are ranked by lexical relevance to the query and capped
+            at retrieval_neighbors_per_source, so the page-mate carrying the asked-for
+            value wins the slot. They were previously ordered by file_id — an
+            arbitrary UUID — which let an unrelated document's page-mates crowd out
+            those of the top-ranked hit purely by alphabetical luck.
+
+        Image-pointer chunks are excluded: they are surfaced via the diagram path and
+        would only consume budget here.
+        """
         if not documents or settings.retrieval_neighbor_pages <= 0:
+            return documents
+
+        per_source = max(0, settings.retrieval_neighbors_per_source)
+        if per_source == 0:
             return documents
 
         all_docs = await self.vector_db._get_all_documents(
             user_id=str(user_id) if user_id else None
         )
-        by_id = {str(doc.get("id")): doc for doc in documents if doc.get("id")}
-        result = list(documents)
+        seen_ids = {str(doc.get("id")) for doc in documents if doc.get("id")}
+        radius = settings.retrieval_neighbor_pages
+        query_terms = self.vector_db._keyword_terms(query or "")
 
-        source_keys = {
-            (str(doc.get("file_id")), int(doc.get("page_number") or 0))
-            for doc in documents
-            if doc.get("file_id") and doc.get("page_number")
-        }
-        if not source_keys:
-            return documents
+        # Each neighbour is claimed by the HIGHEST-RANKED document whose page it
+        # adjoins, so it rides with the best match instead of being repeated.
+        claimed: set[str] = set()
+        neighbors_by_source: dict[int, list[dict]] = {}
+        for index, source in enumerate(documents):
+            file_id = str(source.get("file_id") or "")
+            page = int(source.get("page_number") or 0)
+            if not file_id or not page:
+                continue
 
-        neighbor_radius = settings.retrieval_neighbor_pages
-        neighbors = []
-        for candidate in all_docs:
-            candidate_id = str(candidate.get("id"))
-            if candidate_id in by_id:
-                continue
-            if self._is_index_chunk(candidate):
-                continue
-            candidate_file = str(candidate.get("file_id"))
-            candidate_page = int(candidate.get("page_number") or 0)
-            if not candidate_file or not candidate_page:
-                continue
-            if any(
-                candidate_file == file_id and abs(candidate_page - page_number) <= neighbor_radius
-                for file_id, page_number in source_keys
-            ):
-                candidate["neighbor_context"] = True
-                candidate.setdefault("relevance_score", 0.0)
-                neighbors.append(candidate)
+            bucket = []
+            for candidate in all_docs:
+                candidate_id = str(candidate.get("id"))
+                if candidate_id in seen_ids or candidate_id in claimed:
+                    continue
+                if candidate.get("content_type") in ("diagram", "chart_image"):
+                    continue
+                if str(candidate.get("file_id") or "") != file_id:
+                    continue
+                candidate_page = int(candidate.get("page_number") or 0)
+                if not candidate_page or abs(candidate_page - page) > radius:
+                    continue
+                if self._is_index_chunk(candidate):
+                    continue
+                bucket.append(candidate)
 
-        neighbors.sort(
-            key=lambda doc: (
-                str(doc.get("file_id")),
-                int(doc.get("page_number") or 0),
-                int(doc.get("chunk_index") or 0),
+            if not bucket:
+                continue
+            bucket.sort(
+                key=lambda doc: (
+                    -self.vector_db._keyword_score(query_terms, doc.get("chunk_text", "")),
+                    int(doc.get("page_number") or 0),
+                    int(doc.get("chunk_index") or 0),
+                )
             )
-        )
+            selected = bucket[:per_source]
+            for neighbor in selected:
+                neighbor["neighbor_context"] = True
+                neighbor.setdefault("relevance_score", 0.0)
+                claimed.add(str(neighbor.get("id")))
+            neighbors_by_source[index] = selected
 
-        for neighbor in neighbors:
+        result: list[dict] = []
+        for index, source in enumerate(documents):
             if len(result) >= max_documents:
                 break
-            result.append(neighbor)
+            result.append(source)
+            for neighbor in neighbors_by_source.get(index, []):
+                if len(result) >= max_documents:
+                    break
+                result.append(neighbor)
 
         return result
 

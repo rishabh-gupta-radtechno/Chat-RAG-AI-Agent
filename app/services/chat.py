@@ -194,9 +194,19 @@ class ChatService:
         Conversation history is prepended to the keyword/lexical query ONLY for
         genuine follow-up questions (see _is_followup); a self-contained question
         retrieves on its own terms so an earlier, unrelated topic cannot drag
-        retrieval onto the wrong document. The embedding always uses the bare
-        message — bge-m3 handles multilingual queries natively without translation.
+        retrieval onto the wrong document.
+
+        A Devanagari question is translated to English before retrieval. bge-m3
+        embeds Hindi natively, but the LEXICAL half of retrieval cannot: the corpus
+        is English and _keyword_terms() keeps only [a-z0-9], so a Hindi query reduces
+        to [] — which returns zero keyword hits AND zeroes lexical_score for every
+        document — while BM25 tokenizes to the stray digits alone ('23', '79'), which
+        matches noise rather than content. Section/heading rescues are likewise blind
+        to Devanagari. Retrieving with the English text restores all of those signals.
+        English questions are returned unchanged (no translation call). Answer
+        generation still runs on the original message, so replies stay in Hindi.
         """
+        query = message
         if history and self._is_followup(message):
             prior_questions = [
                 turn.question.strip()
@@ -212,9 +222,10 @@ class ChatService:
                 # follow-up ("how does it do that?") embeds too generically and pulls
                 # any manual's "how it works" content, so ground the vector search in
                 # the conversation's subject too.
-                expanded = "\n".join(prior_questions + [message])
-                return expanded, expanded
-        return message, message
+                query = "\n".join(prior_questions + [message])
+
+        retrieval_query = await self._translate_query_for_retrieval(query)
+        return retrieval_query, retrieval_query
 
     async def _translate_query_for_retrieval(self, message: str) -> str:
         """Translate Hindi/Devanagari questions to English for retrieval.

@@ -211,6 +211,12 @@ class Settings(BaseSettings):
     vector_search_top_k: int = 12
     similarity_threshold: float = 0.5
     retrieval_neighbor_pages: int = 1
+    # How many same-page chunks ride along with each retrieved chunk. They are
+    # emitted directly after the chunk they support, so they compete for the
+    # rag_context_docs budget: 1 lets every result bring the page-mate holding the
+    # value it references (a formula's table) while keeping several distinct sources
+    # in context; raise it to favour depth on one page over breadth across manuals.
+    retrieval_neighbors_per_source: int = 1
     rag_context_docs: int = 6
     rag_context_max_chars: int = 8000
     # After generation, verify the answer's words actually overlap the retrieved
