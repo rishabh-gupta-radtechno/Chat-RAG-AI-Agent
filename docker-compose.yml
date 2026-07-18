@@ -50,13 +50,20 @@ services:
       - ollama_data:/root/.ollama
     environment:
       OLLAMA_HOST: 0.0.0.0:11434
-      # Keep only ONE model resident at a time. Ingestion runs vision as one phase
-      # and embedding as a later phase (they don't overlap), and chat isn't used
-      # during a sync — so holding qwen2.5vl + bge-m3 + qwen3 together only starves
-      # the host RAM and gets the vision runner OOM-killed ("unexpected EOF").
-      OLLAMA_MAX_LOADED_MODELS: "1"
-      # Unload a model promptly once a phase finishes, freeing RAM for the next.
-      OLLAMA_KEEP_ALIVE: "30s"
+      # A single chat turn calls TWO models (bge-m3 to embed the query, qwen3 to
+      # answer) — with only one slot, every turn paid a full reload of one model
+      # to make room for the other, on top of CPU-only generation time (this was
+      # the dominant cost behind multi-minute responses, not just slow tokens/sec).
+      # 2 slots lets chat+embed stay resident together; ingestion still never
+      # needs vision+embed+chat all at once (vision then embedding are sequential
+      # phases per the ingest pipeline), so it stays within the same 2-slot cap.
+      # Needs host RAM for qwen3:8b (~5-6GB) + bge-m3 (~1.2GB) resident together —
+      # fine on 16GB+, revert to 1 on a RAM-constrained host.
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      # Keep a model warm between the calls of one chat turn (translate -> embed
+      # -> generate can span a couple minutes); 30s evicted it mid-turn even
+      # when nothing else needed the slot.
+      OLLAMA_KEEP_ALIVE: "5m"
       # One request at a time — bounds KV-cache memory (a big image balloons it).
       OLLAMA_NUM_PARALLEL: "1"
     healthcheck:
