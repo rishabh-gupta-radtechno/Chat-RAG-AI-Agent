@@ -406,9 +406,17 @@ class ReActAgent:
         These want the verbatim manual section. An interrogative/descriptive
         question ("what is the principle of operation?") does not — it is deferred
         to the LLM so the answer is summarized and concluded, not a raw section dump.
+
+        A bare heading is always a short English manual title; a Devanagari message
+        is a full natural-language question by construction. _INTERROGATIVE_RE and
+        _important_terms only recognise ASCII/English, so a Hindi question carrying
+        one stray Roman-script token (a part code, an abbreviation like "Poc") was
+        indistinguishable from a 1-5-term bare heading and got the verbatim raw
+        section/table dump instead of a synthesized LLM answer — skipping the LLM
+        call entirely, which also skipped the "answer in Hindi" instruction.
         """
         text = (question or "").strip()
-        if not text or cls._INTERROGATIVE_RE.search(text):
+        if not text or cls._INTERROGATIVE_RE.search(text) or re.search(r"[ऀ-ॿ]", text):
             return False
         return 1 <= len(cls._important_terms(text)) <= 5
 
