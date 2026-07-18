@@ -198,6 +198,20 @@ class Settings(BaseSettings):
     enable_bm25_search: bool = True
     enable_reranking: bool = True
     rerank_top_k: int = 10
+    # Cross-encoder reranker model. bge-reranker-v2-m3 is a strong MULTILINGUAL
+    # reranker from the same BGE family as the bge-m3 embedder, so a Hindi query and
+    # an English manual chunk are scored in one shared space — the right match for
+    # this on-prem Hindi/English corpus. It is heavier than the previous
+    # mmarco-mMiniLMv2 (XLM-RoBERTa-large, ~560M params), so on a CPU host it costs
+    # more time/memory per query; drop to 'BAAI/bge-reranker-base' if RAM-bound.
+    # Loaded via sentence-transformers CrossEncoder and downloaded once from HF on
+    # first use (pre-pull on an offline host).
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    # Max query+chunk tokens the reranker scores at once. Kept at 512 to bound CPU
+    # cost and keep parity with table_rows_per_chunk (chunks already fit this
+    # window); bge-reranker-v2-m3 itself supports far longer input, so raise this on
+    # a host with spare RAM if you also grow the chunk size.
+    reranker_max_length: int = 512
     # Reciprocal Rank Fusion damping. Larger flattens the head (rank 1 vs 2 matter
     # less) and leans on cross-channel agreement; 60 is the standard published value.
     rrf_k: int = 60

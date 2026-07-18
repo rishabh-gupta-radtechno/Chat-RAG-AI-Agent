@@ -146,18 +146,25 @@ Retrieval is **hybrid**, not dense-only: dense-only search misses exact-token lo
 specific part/wagon/code that is one row inside a big table, whose averaged embedding ranks
 low). For each query the retriever runs **dense (semantic)**, **BM25 (exact-token)**,
 **keyword**, and **section** searches, then merges and de-duplicates the pools (diagram and
-table-of-contents/index chunks are dropped from text context).
+table-of-contents/index chunks are dropped from text context). The dense channel accepts
+**one or more query vectors** — a Hindi question is embedded in both Hindi and English and the
+two searches are unioned (best cosine per chunk) into that single semantic channel before
+fusion (see *Dual-query multilingual retrieval* below).
 
 - **BM25** (`rank_bm25`, `enable_bm25_search`) recalls exact-token matches. Its index is
   built once over the whole collection and **cached** (`bm25_cache_ttl_seconds`), and
   **invalidated the moment a document is embedded** (`invalidate_bm25_cache`) so freshly
   synced content is searchable immediately.
-- **Cross-encoder reranker** (`enable_reranking`, `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`)
+- **Cross-encoder reranker** (`enable_reranking`, `reranker_model` = `BAAI/bge-reranker-v2-m3`)
   reorders the merged candidate pool by true query relevance and keeps the top
-  `rerank_top_k`. The model loads **once** as a shared singleton (not per query). If the
+  `rerank_top_k`. It is a strong **multilingual** reranker from the same BGE family as the
+  `bge-m3` embedder, so a Hindi query and an English chunk are scored in one shared space —
+  matching the dual-query retrieval above. The model loads **once** as a shared singleton
+  (not per query) and is downloaded from HF on first use (pre-pull on an offline host). If the
   reranker is off/unavailable, candidates fall back to the combined lexical+semantic score.
   This is why `table_rows_per_chunk` is kept small — each table chunk stays within the
-  reranker's ~512-token window, so a single-row query can actually surface it.
+  reranker's scoring window (`reranker_max_length`, 512), so a single-row query can actually
+  surface it.
 
 The retriever then adds section filtering, neighbor-page expansion, content-type scoring
 bonuses, diagram exclusion from text context, and re-attaches chart/diagram images to the
@@ -176,8 +183,18 @@ the query** — history is a help for follow-ups but a liability for fresh quest
 - **Retrieval query construction** (`_build_retrieval_query`): for a genuine follow-up, the
   last couple of user turns are prepended to the **keyword/lexical** query so the referent
   resolves. A self-contained question retrieves on **its own terms**, so an earlier,
-  unrelated topic can't drag retrieval onto the wrong document. The **embedding always uses
-  the bare message** — bge-m3 handles multilingual queries natively, no translation.
+  unrelated topic can't drag retrieval onto the wrong document.
+- **Dual-query multilingual retrieval** (Hindi/Devanagari questions): the original query is
+  **never discarded**. The service detects Devanagari and creates an English version for the
+  **lexical** channels only — BM25/keyword/section/heading are English-only, because the corpus
+  and the `[a-z0-9]` tokenizer are English, so a raw Hindi query reduces to noise there. The
+  **dense** channel instead embeds *both* the original Hindi **and** the English translation
+  (bge-m3 aligns the two languages in one space). Each vector is searched, the hits are
+  **unioned** (best cosine per chunk) into one semantic channel, which is then fused (RRF) with
+  the lexical channels and reranked (`bge-reranker-v2-m3`, itself multilingual). So the Hindi
+  vector recovers meaning a lossy translation drops, and vice versa — the standard
+  multilingual-search pattern (search Hindi **and** English, merge, rerank). If translation
+  fails, it degrades to a single Hindi embedding rather than losing the query.
 - The resolved query then enters the hybrid retriever (stage 8).
 
 ## Key constraints & design decisions
@@ -224,7 +241,7 @@ the query** — history is a help for follow-ups but a liability for fresh quest
 | `embedding_model`, `embedding_dimension` | BGE-M3 / Qdrant vector size |
 | `embed_num_ctx`, `embed_safety_margin_tokens`, `embed_min_chunk_tokens`, `embed_split_max_depth`, `embed_tokenizer_model` | Oversized-chunk split-and-retry (no chunk dropped) |
 | `embed_page_batch_size`, `qdrant_upsert_batch_size`, `qdrant_upsert_max_retries` | Incremental page-window writes + upsert sub-batching/retry |
-| `enable_bm25_search`, `enable_reranking`, `rerank_top_k`, `bm25_cache_ttl_seconds` | Hybrid retrieval (BM25 + cross-encoder reranking) |
+| `enable_bm25_search`, `enable_reranking`, `rerank_top_k`, `reranker_model`, `reranker_max_length`, `bm25_cache_ttl_seconds` | Hybrid retrieval (BM25 + multilingual cross-encoder reranking) |
 | `vector_search_top_k`, `similarity_threshold`, `enable_grounding_check` | Dense candidate pool + answer grounding |
 | `ollama_num_predict`, `ollama_num_predict_concise`, `ollama_think` | Answer length caps + reasoning toggle |
 | `ollama_chat_model` | Answer LLM (local) |

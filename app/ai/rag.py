@@ -83,10 +83,15 @@ class RAGPipeline:
             from sentence_transformers import CrossEncoder
             from app.core.device import torch_device
             _RERANKER_SINGLETON = CrossEncoder(
-                'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', device=torch_device()
+                settings.reranker_model,
+                max_length=settings.reranker_max_length,
+                device=torch_device(),
             )
             self._reranker = _RERANKER_SINGLETON
-            logger.info("Reranking enabled (cross-encoder loaded once, shared)")
+            logger.info(
+                "Reranking enabled (cross-encoder '%s' loaded once, shared; max_length=%d)",
+                settings.reranker_model, settings.reranker_max_length,
+            )
         except ImportError:
             _RERANKER_FAILED = True
             logger.warning("sentence-transformers not installed, reranking disabled")
