@@ -155,9 +155,13 @@ fusion (see *Dual-query multilingual retrieval* below).
   built once over the whole collection and **cached** (`bm25_cache_ttl_seconds`), and
   **invalidated the moment a document is embedded** (`invalidate_bm25_cache`) so freshly
   synced content is searchable immediately.
-- **Cross-encoder reranker** (`enable_reranking`, `reranker_model` = `BAAI/bge-reranker-v2-m3`)
-  reorders the merged candidate pool by true query relevance and keeps the top
-  `rerank_top_k`. It is a strong **multilingual** reranker from the same BGE family as the
+- **Cross-encoder reranker** (`enable_reranking`, `reranker_model` = `BAAI/bge-reranker-v2-m3`).
+  The funnel is **cast wide → rerank a bounded pool → send a focused set to the LLM**: the
+  fused candidates are pre-ranked by fusion+bonus score, the top `rerank_candidate_pool` (18)
+  are handed to the cross-encoder (bounding latency on the heavier BGE reranker and keeping
+  section/heading rescues in the pool), it reorders them by true query relevance and keeps the
+  top `rerank_top_k` (12), and finally `rag_context_docs` (10) reach the LLM. It is a strong
+  **multilingual** reranker from the same BGE family as the
   `bge-m3` embedder, so a Hindi query and an English chunk are scored in one shared space —
   matching the dual-query retrieval above. The model loads **once** as a shared singleton
   (not per query) and is downloaded from HF on first use (pre-pull on an offline host). If the
@@ -241,7 +245,7 @@ the query** — history is a help for follow-ups but a liability for fresh quest
 | `embedding_model`, `embedding_dimension` | BGE-M3 / Qdrant vector size |
 | `embed_num_ctx`, `embed_safety_margin_tokens`, `embed_min_chunk_tokens`, `embed_split_max_depth`, `embed_tokenizer_model` | Oversized-chunk split-and-retry (no chunk dropped) |
 | `embed_page_batch_size`, `qdrant_upsert_batch_size`, `qdrant_upsert_max_retries` | Incremental page-window writes + upsert sub-batching/retry |
-| `enable_bm25_search`, `enable_reranking`, `rerank_top_k`, `reranker_model`, `reranker_max_length`, `bm25_cache_ttl_seconds` | Hybrid retrieval (BM25 + multilingual cross-encoder reranking) |
+| `enable_bm25_search`, `enable_reranking`, `rerank_candidate_pool`, `rerank_top_k`, `reranker_model`, `reranker_max_length`, `bm25_cache_ttl_seconds` | Hybrid retrieval (BM25 + multilingual cross-encoder reranking) |
 | `vector_search_top_k`, `similarity_threshold`, `enable_grounding_check` | Dense candidate pool + answer grounding |
 | `ollama_num_predict`, `ollama_num_predict_concise`, `ollama_think` | Answer length caps + reasoning toggle |
 | `ollama_chat_model` | Answer LLM (local) |

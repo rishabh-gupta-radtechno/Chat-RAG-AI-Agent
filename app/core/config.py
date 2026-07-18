@@ -197,7 +197,13 @@ class Settings(BaseSettings):
     # reranker then reorders the merged candidates by true query relevance.
     enable_bm25_search: bool = True
     enable_reranking: bool = True
-    rerank_top_k: int = 10
+    # Retrieval funnel: cast a wide net, rerank a bounded pool, send a focused set
+    # to the LLM. rerank_candidate_pool bounds how many of the best fused candidates
+    # the cross-encoder actually scores (predictable latency on the heavier
+    # bge-reranker, and matches "retrieve ~15-20, then rerank"); rerank_top_k is how
+    # many it keeps; rag_context_docs (below) is how many finally reach the LLM.
+    rerank_candidate_pool: int = 18
+    rerank_top_k: int = 12
     # Cross-encoder reranker model. bge-reranker-v2-m3 is a strong MULTILINGUAL
     # reranker from the same BGE family as the bge-m3 embedder, so a Hindi query and
     # an English manual chunk are scored in one shared space — the right match for
@@ -238,7 +244,11 @@ class Settings(BaseSettings):
     # value it references (a formula's table) while keeping several distinct sources
     # in context; raise it to favour depth on one page over breadth across manuals.
     retrieval_neighbors_per_source: int = 1
-    rag_context_docs: int = 6
+    # How many retrieved chunks reach the LLM (the final cut in _format_context).
+    # These slots are shared with interleaved page-neighbours, and the total is still
+    # bounded by rag_context_max_chars, so raising it lets more SMALL chunks in
+    # without growing the token budget. 10 sits in the "best 8-12 to the LLM" band.
+    rag_context_docs: int = 10
     rag_context_max_chars: int = 8000
     # After generation, verify the answer's words actually overlap the retrieved
     # context; if not, replace it with a "not found" response instead of returning

@@ -550,9 +550,16 @@ class RAGPipeline:
 
             candidates = list(documents_by_id.values())
 
-            # Rerank if enabled
+            # Rerank if enabled. The cross-encoder scores only a bounded pool of the
+            # most promising candidates, not the whole fused union: pre-rank by the
+            # fusion+bonus score (so section/heading rescues are guaranteed into the
+            # pool), keep the top rerank_candidate_pool, and rerank those. This gives
+            # the reranker a focused ~15-20 candidate set with predictable latency on
+            # the heavier bge-reranker, then keeps its top rerank_top_k.
             if settings.enable_reranking and self._reranker:
-                candidates = self._rerank_documents(query, candidates, settings.rerank_top_k)
+                candidates.sort(key=self._combined_retrieval_score, reverse=True)
+                pool = candidates[: max(settings.rerank_candidate_pool, settings.rerank_top_k)]
+                candidates = self._rerank_documents(query, pool, settings.rerank_top_k)
             else:
                 candidates.sort(key=self._combined_retrieval_score, reverse=True)
 
