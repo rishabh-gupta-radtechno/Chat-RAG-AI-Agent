@@ -72,10 +72,10 @@ class ChatService:
                 limit=6,
             )
 
-            retrieval_query, embed_query = await self._build_retrieval_query(message, history)
+            retrieval_query, embed_texts = await self._build_retrieval_query(message, history)
 
             # Retrieve relevant documents
-            documents = await self.rag_pipeline.retrieve(retrieval_query, user_id=user_id, embed_query=embed_query)
+            documents = await self.rag_pipeline.retrieve(retrieval_query, user_id=user_id, embed_queries=embed_texts)
             logger.info(f"Retrieved {len(documents)} documents")
             diagram_user_id = None if any(
                 doc.get("retrieval_scope") == "global_fallback" for doc in documents
@@ -196,8 +196,8 @@ class ChatService:
             return True
         return False
 
-    async def _build_retrieval_query(self, message: str, history: list) -> tuple[str, str]:
-        """Build (keyword_query, embed_query) for retrieval.
+    async def _build_retrieval_query(self, message: str, history: list) -> tuple[str, list[str]]:
+        """Build (keyword_query, embed_texts) for retrieval.
 
         Conversation history is prepended to the keyword/lexical query ONLY for
         genuine follow-up questions (see _is_followup); a self-contained question
@@ -210,9 +210,15 @@ class ChatService:
         to [] — which returns zero keyword hits AND zeroes lexical_score for every
         document — while BM25 tokenizes to the stray digits alone ('23', '79'), which
         matches noise rather than content. Section/heading rescues are likewise blind
-        to Devanagari. Retrieving with the English text restores all of those signals.
-        English questions are returned unchanged (no translation call). Answer
-        generation still runs on the original message, so replies stay in Hindi.
+        to Devanagari. So the keyword_query is always the English text.
+
+        The EMBEDDING half is different: rather than embed the English translation
+        alone, a Hindi question is embedded in BOTH languages (English translation +
+        original Hindi) and each is searched, then merged. bge-m3 aligns Hindi and
+        English in one space, so the Hindi vector recovers meaning a lossy/awkward
+        translation drops (and vice versa) — two shots at dense recall instead of one.
+        English questions embed once (no translation call). Answer generation still
+        runs on the original message, so replies stay in Hindi.
         """
         query = message
         if history and self._is_followup(message):
@@ -232,8 +238,19 @@ class ChatService:
                 # the conversation's subject too.
                 query = "\n".join(prior_questions + [message])
 
-        retrieval_query = await self._translate_query_for_retrieval(query)
-        return retrieval_query, retrieval_query
+        if not self._contains_devanagari(query):
+            return query, [query]
+
+        english = await self._translate_query_for_retrieval(query)
+        # Lexical search runs on English only (corpus + tokenizer are English).
+        # Semantic search runs on both languages when the translation actually
+        # differs from the original; if translation failed (returned the Hindi
+        # unchanged) this collapses to a single Hindi embedding — the same input
+        # BM25/keyword see, so nothing regresses.
+        embed_texts = [english]
+        if english.strip() != query.strip():
+            embed_texts.append(query)
+        return english, embed_texts
 
     async def _translate_query_for_retrieval(self, message: str) -> str:
         """Translate Hindi/Devanagari questions to English for retrieval.

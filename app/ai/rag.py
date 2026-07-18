@@ -407,13 +407,16 @@ class RAGPipeline:
         query: str,
         top_k: Optional[int] = None,
         user_id: Optional[uuid.UUID] = None,
-        embed_query: Optional[str] = None,
+        embed_queries: Optional[list[str]] = None,
     ) -> list[dict]:
         """Retrieve relevant documents for a query with hybrid search and reranking.
 
-        embed_query: if provided, use this text for the vector embedding instead of
-        the full query string. Pass the English translation for Hindi questions so the
-        embedding is not diluted by Devanagari tokens.
+        embed_queries: the text(s) to embed for dense/vector search, independent of
+        the lexical ``query``. Pass one string for an English question; pass BOTH the
+        English translation and the original Hindi for a Devanagari question, so each
+        is embedded and searched and the results merged (bge-m3 aligns the two
+        languages, so the Hindi vector recovers what a lossy translation drops). When
+        omitted, the lexical ``query`` is embedded.
         """
         try:
             if not self._initialized:
@@ -421,18 +424,31 @@ class RAGPipeline:
 
             top_k = top_k or settings.vector_search_top_k
 
-            # Use embed_query for vector embedding (English-only for Hindi input)
-            embed_text = embed_query or query
-            if settings.use_local_embeddings:
-                query_embedding = self._embed_locally(embed_text)
-            else:
-                query_embedding = await self.llm_client.embed(embed_text)
-            logger.info(f"Generated embedding for query: {embed_text}")
+            # Embed each retrieval text (English translation and/or original Hindi),
+            # de-duplicated so an English question — where translation is a no-op —
+            # is not embedded twice.
+            embed_texts = [t.strip() for t in (embed_queries or [query]) if t and t.strip()]
+            if not embed_texts:
+                embed_texts = [query]
+            seen_embed_texts: set[str] = set()
+            unique_embed_texts: list[str] = []
+            for text in embed_texts:
+                if text.lower() not in seen_embed_texts:
+                    seen_embed_texts.add(text.lower())
+                    unique_embed_texts.append(text)
+
+            query_embeddings: list[list[float]] = []
+            for text in unique_embed_texts:
+                if settings.use_local_embeddings:
+                    query_embeddings.append(self._embed_locally(text))
+                else:
+                    query_embeddings.append(await self.llm_client.embed(text))
+            logger.info("Generated %d query embedding(s) for: %s", len(query_embeddings), unique_embed_texts)
 
             semantic_documents, bm25_documents, keyword_documents, retrieval_user_id = (
                 await self._retrieve_candidates(
                     query=query,
-                    query_embedding=query_embedding,
+                    query_embeddings=query_embeddings,
                     limit=top_k * 2,
                     user_id=user_id,
                 )
@@ -552,7 +568,7 @@ class RAGPipeline:
                 document["relevance_score"] = self._combined_retrieval_score(document)
 
             logger.info(f"Retrieved {len(documents)} documents after reranking")
-            logger.info("Retrieval scores for query: %s", embed_text[:120])
+            logger.info("Retrieval scores for query: %s", query[:120])
             for i, doc in enumerate(documents[:5], 1):
                 logger.info(
                     "  #%d  score=%.3f  %s  page %s  (%s)",
@@ -572,7 +588,7 @@ class RAGPipeline:
     async def _retrieve_candidates(
         self,
         query: str,
-        query_embedding: list[float],
+        query_embeddings: list[list[float]],
         limit: int,
         user_id: Optional[uuid.UUID] = None,
     ) -> tuple[list[dict], list[dict], list[dict], Optional[uuid.UUID]]:
@@ -581,12 +597,12 @@ class RAGPipeline:
         Server manuals are commonly uploaded by an admin account, while end users
         chat from their own accounts. If the user-scoped Qdrant filter finds no
         points, an unscoped fallback lets those centrally uploaded manuals answer.
+
+        ``query_embeddings`` may hold more than one vector (e.g. an English + Hindi
+        pair); each is searched and the hits are merged into one semantic channel.
         """
-        semantic_documents = await self.vector_db.search(
-            query_embedding=query_embedding,
-            top_k=limit,
-            threshold=settings.similarity_threshold,
-            user_id=str(user_id) if user_id else None,
+        semantic_documents = await self._semantic_search(
+            query_embeddings, limit, user_id=str(user_id) if user_id else None,
         )
 
         bm25_documents = []
@@ -606,11 +622,8 @@ class RAGPipeline:
             "No user-scoped documents found for user %s; retrying retrieval without user filter",
             user_id,
         )
-        semantic_documents = await self.vector_db.search(
-            query_embedding=query_embedding,
-            top_k=limit,
-            threshold=settings.similarity_threshold,
-            user_id=None,
+        semantic_documents = await self._semantic_search(
+            query_embeddings, limit, user_id=None,
         )
 
         bm25_documents = []
@@ -627,6 +640,52 @@ class RAGPipeline:
             document["retrieval_scope"] = "global_fallback"
 
         return semantic_documents, bm25_documents, keyword_documents, None
+
+    async def _semantic_search(
+        self,
+        query_embeddings: list[list[float]],
+        limit: int,
+        user_id: Optional[str],
+    ) -> list[dict]:
+        """Dense search over one or more query vectors, merged into one ranking.
+
+        With a single vector this is a plain Qdrant search. With several (the
+        English + Hindi pair for a Devanagari question), each vector is searched
+        independently and the hits are merged by document id, keeping the highest
+        cosine any vector gave a chunk, then re-sorted so the merged list is a
+        proper best-of ranking. Rank — not raw score — is what the downstream RRF
+        fusion consumes, so this simply gives each chunk its best rank across the
+        languages before fusion sees the channel.
+        """
+        if len(query_embeddings) == 1:
+            return await self.vector_db.search(
+                query_embedding=query_embeddings[0],
+                top_k=limit,
+                threshold=settings.similarity_threshold,
+                user_id=user_id,
+            )
+
+        best_by_id: dict[str, dict] = {}
+        for embedding in query_embeddings:
+            documents = await self.vector_db.search(
+                query_embedding=embedding,
+                top_k=limit,
+                threshold=settings.similarity_threshold,
+                user_id=user_id,
+            )
+            for document in documents:
+                document_id = str(document.get("id"))
+                score = float(document.get("relevance_score") or 0.0)
+                existing = best_by_id.get(document_id)
+                if existing is None or score > float(existing.get("relevance_score") or 0.0):
+                    best_by_id[document_id] = document
+
+        merged = sorted(
+            best_by_id.values(),
+            key=lambda document: float(document.get("relevance_score") or 0.0),
+            reverse=True,
+        )
+        return merged[:limit]
 
     @staticmethod
     def _bm25_tokenize(text: str) -> list[str]:
