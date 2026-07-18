@@ -1,0 +1,22 @@
+# Questions used by the load test (one per line). Lines starting with # are ignored.
+# Replace these with questions that actually match your ingested documents so the
+# RAG retrieval + LLM path is exercised realistically.
+
+What is the principle of operation described in the manual?
+List the maintenance steps for the brake system.
+What are the dimensions and weight of the wagon body?
+Explain the air brake distributor valve function.
+What is the maximum axle load permitted?
+Describe the coupler assembly and its components.
+What torque values are specified for the bogie bolts?
+Summarize the safety precautions for maintenance.
+What is the drawing number for the side frame?
+How is the buffer height measured and adjusted?
+What lubricants are recommended for the axle boxes?
+Explain the loading and unloading procedure.
+What are the inspection intervals for wheel sets?
+Describe the suspension arrangement of the bogie.
+What is the tare weight and payload capacity?
+बोगी के रखरखाव की प्रक्रिया क्या है?
+ब्रेक सिस्टम के मुख्य घटक कौन से हैं?
+पहिया सेट के निरीक्षण अंतराल क्या हैं?
