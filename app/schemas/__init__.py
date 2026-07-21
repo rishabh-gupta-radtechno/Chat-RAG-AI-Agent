@@ -66,6 +66,13 @@ class UserResponse(BaseModel):
 # ============ File Schemas ============
 
 
+class FileStatusUpdateRequest(BaseModel):
+    """Request body for toggling a file's status."""
+
+    is_active: bool = Field(default=True)
+    file_status: Optional[bool] = None
+
+
 class FileUploadResponse(BaseModel):
     """File upload response schema."""
 
@@ -78,6 +85,7 @@ class FileUploadResponse(BaseModel):
     file_type: str
     is_active: bool
     is_embedded: bool
+    file_status: bool
     created_at: datetime
 
 
@@ -91,7 +99,9 @@ class FileListResponse(BaseModel):
     filepath: str
     file_size: int
     file_type: str
+    is_active: bool
     is_embedded: bool
+    file_status: bool
     created_at: datetime
 
 

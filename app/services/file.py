@@ -96,6 +96,18 @@ class FileService:
 
         return updated_file is not None
 
+    async def toggle_file_status(self, file_id: uuid.UUID, user_id: uuid.UUID, file_status: bool) -> bool:
+        """Toggle the file status flag for a file owned by the user."""
+        file = await self.file_repo.get_by_id(file_id)
+        if not file or file.uploaded_by != user_id:
+            return False
+
+        updated_file = await self.file_repo.update_file_status(file_id, file_status)
+        await self.file_repo.commit()
+
+        logger.info(f"File status updated: {file_id} -> {file_status}")
+        return updated_file is not None
+
     async def read_file_content(self, filepath: str) -> str:
         """Read file content."""
         try:
