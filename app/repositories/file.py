@@ -86,3 +86,7 @@ class FileRepository(BaseRepository[File]):
     async def mark_as_embedded(self, file_id: uuid.UUID) -> Optional[File]:
         """Mark file as embedded."""
         return await self.update(file_id, is_embedded=True)
+
+    async def update_file_status(self, file_id: uuid.UUID, file_status: bool) -> Optional[File]:
+        """Update the file status flag."""
+        return await self.update(file_id, file_status=file_status)

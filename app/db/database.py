@@ -119,6 +119,10 @@ async def create_all_tables():
                 """
             )
         )
+        # Add file status column to files table if it doesn't exist
+        await conn.execute(
+            text("ALTER TABLE files ADD COLUMN IF NOT EXISTS file_status BOOLEAN DEFAULT TRUE")
+        )
         # Fix files.uploaded_by FK: drop old reference to users, add reference to admins
         await conn.execute(
             text(

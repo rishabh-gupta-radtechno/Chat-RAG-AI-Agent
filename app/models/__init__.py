@@ -57,6 +57,7 @@ class File(Base):
     file_type: Mapped[str] = mapped_column(String(50))  # pdf, txt, docx, etc.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_embedded: Mapped[bool] = mapped_column(Boolean, default=False)
+    file_status: Mapped[bool] = mapped_column(Boolean, default=True)
     uploaded_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("admins.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

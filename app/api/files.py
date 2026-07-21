@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user_id
 from app.db.database import get_db, AsyncSessionLocal
-from app.schemas import FileListResponse, FileUploadResponse, SyncEmbeddingsResponse
+from app.schemas import FileListResponse, FileStatusUpdateRequest, FileUploadResponse, SyncEmbeddingsResponse
 from app.services.file import FileService
 from app.ai.rag import RAGPipeline
 from app.ai.vector_db import VectorDBClient
@@ -97,6 +97,44 @@ async def list_user_files(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error listing files",
+        )
+
+
+@router.post("/{file_id}/status")
+async def update_file_status(
+    file_id: str,
+    payload: FileStatusUpdateRequest,
+    user_id = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_db),
+):
+    """Enable or disable a file by updating its status flag."""
+    try:
+        from app.utils.helpers import validate_uuid
+
+        file_uuid = validate_uuid(file_id)
+        if not file_uuid:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file ID")
+
+        status_value = payload.file_status if payload.file_status is not None else payload.is_active
+
+        file_service = FileService(session)
+        success = await file_service.toggle_file_status(file_uuid, user_id, status_value)
+        if not success:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+        return {
+            "status": "updated",
+            "file_id": file_id,
+            "file_status": status_value,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating file status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating file status",
         )
 
 
