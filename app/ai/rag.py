@@ -413,6 +413,7 @@ class RAGPipeline:
         top_k: Optional[int] = None,
         user_id: Optional[uuid.UUID] = None,
         embed_queries: Optional[list[str]] = None,
+        excluded_file_ids: Optional[set[str]] = None,
     ) -> list[dict]:
         """Retrieve relevant documents for a query with hybrid search and reranking.
 
@@ -422,6 +423,11 @@ class RAGPipeline:
         is embedded and searched and the results merged (bge-m3 aligns the two
         languages, so the Hindi vector recovers what a lossy translation drops). When
         omitted, the lexical ``query`` is embedded.
+
+        excluded_file_ids: file ids (as strings) whose chunks must be ignored — the
+        files an admin has disabled via ``file_status``. They are dropped from every
+        retrieval channel BEFORE fusion, so a disabled file neither occupies a
+        candidate slot nor shifts the rank fusion, and never reaches consolidation.
         """
         try:
             if not self._initialized:
@@ -456,6 +462,7 @@ class RAGPipeline:
                     query_embeddings=query_embeddings,
                     limit=top_k * 2,
                     user_id=user_id,
+                    excluded_file_ids=excluded_file_ids,
                 )
             )
 
@@ -469,6 +476,7 @@ class RAGPipeline:
                     section_ref,
                     limit=top_k * 2,
                     user_id=str(retrieval_user_id) if retrieval_user_id else None,
+                    excluded_file_ids=excluded_file_ids,
                 )
                 for document in section_documents:
                     document["section_match"] = True
@@ -487,10 +495,18 @@ class RAGPipeline:
                     heading_ref,
                     limit=top_k * 2,
                     user_id=str(retrieval_user_id) if retrieval_user_id else None,
+                    excluded_file_ids=excluded_file_ids,
                 )
                 for document in heading_documents:
                     document["heading_match"] = True
                 logger.info("Heading '%s' matched %d chunk(s)", heading_ref, len(heading_documents))
+
+            # NOTE: chunks from disabled files (file_status = False) are already
+            # excluded by Qdrant inside every channel above (semantic/keyword/section/
+            # heading via a must_not filter, BM25 while walking its score ranking), so
+            # each channel's limit is spent entirely on active chunks. No post-hoc
+            # drop is needed here — doing it after retrieval is exactly what starved a
+            # query of good matches when disabled chunks used up the candidate budget.
 
             # Put every channel on a common 0..1 scale before combining. Semantic
             # scores are cosine (0..1) but BM25 returns unbounded term-frequency
@@ -568,6 +584,7 @@ class RAGPipeline:
                 user_id=retrieval_user_id,
                 max_documents=settings.rag_context_docs + max(top_k, 6),
                 query=query,
+                excluded_file_ids=excluded_file_ids,
             )
 
             # Publish the ranking score once retrieval has settled. Callers (source
@@ -603,6 +620,7 @@ class RAGPipeline:
         query_embeddings: list[list[float]],
         limit: int,
         user_id: Optional[uuid.UUID] = None,
+        excluded_file_ids: Optional[set[str]] = None,
     ) -> tuple[list[dict], list[dict], list[dict], Optional[uuid.UUID]]:
         """Retrieve scoped docs first, then fall back to shared/admin-ingested docs.
 
@@ -612,19 +630,27 @@ class RAGPipeline:
 
         ``query_embeddings`` may hold more than one vector (e.g. an English + Hindi
         pair); each is searched and the hits are merged into one semantic channel.
+
+        Disabled files (``excluded_file_ids``) are filtered inside each channel, so
+        every channel's ``limit`` is spent on active chunks only — a query is never
+        starved of good matches because disabled chunks used up the budget.
         """
         semantic_documents = await self._semantic_search(
             query_embeddings, limit, user_id=str(user_id) if user_id else None,
+            excluded_file_ids=excluded_file_ids,
         )
 
         bm25_documents = []
         if settings.enable_bm25_search:
-            bm25_documents = await self._bm25_search(query, limit, user_id=user_id)
+            bm25_documents = await self._bm25_search(
+                query, limit, user_id=user_id, excluded_file_ids=excluded_file_ids,
+            )
 
         keyword_documents = await self.vector_db.keyword_search(
             query,
             limit,
             user_id=str(user_id) if user_id else None,
+            excluded_file_ids=excluded_file_ids,
         )
 
         if not user_id or semantic_documents or bm25_documents or keyword_documents:
@@ -636,16 +662,20 @@ class RAGPipeline:
         )
         semantic_documents = await self._semantic_search(
             query_embeddings, limit, user_id=None,
+            excluded_file_ids=excluded_file_ids,
         )
 
         bm25_documents = []
         if settings.enable_bm25_search:
-            bm25_documents = await self._bm25_search(query, limit, user_id=None)
+            bm25_documents = await self._bm25_search(
+                query, limit, user_id=None, excluded_file_ids=excluded_file_ids,
+            )
 
         keyword_documents = await self.vector_db.keyword_search(
             query,
             limit,
             user_id=None,
+            excluded_file_ids=excluded_file_ids,
         )
 
         for document in semantic_documents + bm25_documents + keyword_documents:
@@ -658,6 +688,7 @@ class RAGPipeline:
         query_embeddings: list[list[float]],
         limit: int,
         user_id: Optional[str],
+        excluded_file_ids: Optional[set[str]] = None,
     ) -> list[dict]:
         """Dense search over one or more query vectors, merged into one ranking.
 
@@ -668,6 +699,9 @@ class RAGPipeline:
         proper best-of ranking. Rank — not raw score — is what the downstream RRF
         fusion consumes, so this simply gives each chunk its best rank across the
         languages before fusion sees the channel.
+
+        Disabled files are excluded by Qdrant, so ``limit`` returns ``limit`` active
+        chunks rather than a mix that would thin out once disabled ones are dropped.
         """
         if len(query_embeddings) == 1:
             return await self.vector_db.search(
@@ -675,6 +709,7 @@ class RAGPipeline:
                 top_k=limit,
                 threshold=settings.similarity_threshold,
                 user_id=user_id,
+                excluded_file_ids=excluded_file_ids,
             )
 
         best_by_id: dict[str, dict] = {}
@@ -684,6 +719,7 @@ class RAGPipeline:
                 top_k=limit,
                 threshold=settings.similarity_threshold,
                 user_id=user_id,
+                excluded_file_ids=excluded_file_ids,
             )
             for document in documents:
                 document_id = str(document.get("id"))
@@ -738,8 +774,16 @@ class RAGPipeline:
         query: str,
         limit: int,
         user_id: Optional[uuid.UUID] = None,
+        excluded_file_ids: Optional[set[str]] = None,
     ) -> list[dict]:
-        """Perform BM25 search over the cached corpus index."""
+        """Perform BM25 search over the cached corpus index.
+
+        The corpus index is shared/cached, so disabled files stay in it (the
+        disabled set changes as admins toggle status and must not be baked into a
+        TTL-cached index). Instead, chunks from ``excluded_file_ids`` are skipped
+        while walking the score ranking, so the returned ``limit`` are active
+        chunks — the exclusion never costs a result slot.
+        """
         try:
             from rank_bm25 import BM25Okapi  # noqa: F401
         except ImportError:
@@ -749,11 +793,18 @@ class RAGPipeline:
             if bm25 is None or not docs:
                 return []
             scores = bm25.get_scores(self._bm25_tokenize(query))
-            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:limit]
-            return [
-                {"id": docs[i]["id"], "relevance_score": float(scores[i]), **docs[i]}
-                for i in top_indices if scores[i] > 0
-            ]
+            ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+            results: list[dict] = []
+            for i in ranked:
+                if scores[i] <= 0:
+                    break
+                doc = docs[i]
+                if excluded_file_ids and str(doc.get("file_id") or "") in excluded_file_ids:
+                    continue
+                results.append({"id": doc["id"], "relevance_score": float(scores[i]), **doc})
+                if len(results) >= limit:
+                    break
+            return results
         except Exception as e:
             logger.warning(f"BM25 search failed: {e}")
             return []
@@ -764,6 +815,7 @@ class RAGPipeline:
         user_id: Optional[uuid.UUID],
         max_documents: int,
         query: str = "",
+        excluded_file_ids: Optional[set[str]] = None,
     ) -> list[dict]:
         """Interleave each retrieved chunk with the best chunks from its own page.
 
@@ -795,8 +847,11 @@ class RAGPipeline:
         if per_source == 0:
             return documents
 
+        # Disabled files are excluded by Qdrant here too, so a disabled file's
+        # page-mate can never ride in on an active chunk that shares its page number.
         all_docs = await self.vector_db._get_all_documents(
-            user_id=str(user_id) if user_id else None
+            user_id=str(user_id) if user_id else None,
+            excluded_file_ids=excluded_file_ids,
         )
         seen_ids = {str(doc.get("id")) for doc in documents if doc.get("id")}
         radius = settings.retrieval_neighbor_pages

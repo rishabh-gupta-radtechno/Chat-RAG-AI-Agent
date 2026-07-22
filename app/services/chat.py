@@ -16,6 +16,7 @@ from app.ai.llm import OllamaClient
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.repositories.chat import ChatHistoryRepository
+from app.repositories.file import FileRepository
 from app.schemas import (
     ChatResponse,
     ConversationChatResponse,
@@ -35,6 +36,7 @@ class ChatService:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.chat_repo = ChatHistoryRepository(session)
+        self.file_repo = FileRepository(session)
         self.rag_pipeline = RAGPipeline()
         self.agent = ReActAgent(self.rag_pipeline)
         self.llm_client = OllamaClient()
@@ -74,8 +76,20 @@ class ChatService:
 
             retrieval_query, embed_texts = await self._build_retrieval_query(message, history)
 
+            # Files an admin has disabled (file_status = False) are ignored entirely:
+            # their chunks are dropped during retrieval so nothing from them can be
+            # matched, ranked, or used to answer.
+            excluded_file_ids = await self.file_repo.get_disabled_file_ids()
+            if excluded_file_ids:
+                logger.info("Ignoring chunks from %d disabled file(s)", len(excluded_file_ids))
+
             # Retrieve relevant documents
-            documents = await self.rag_pipeline.retrieve(retrieval_query, user_id=user_id, embed_queries=embed_texts)
+            documents = await self.rag_pipeline.retrieve(
+                retrieval_query,
+                user_id=user_id,
+                embed_queries=embed_texts,
+                excluded_file_ids=excluded_file_ids,
+            )
             logger.info(f"Retrieved {len(documents)} documents")
             diagram_user_id = None if any(
                 doc.get("retrieval_scope") == "global_fallback" for doc in documents

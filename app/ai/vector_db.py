@@ -11,6 +11,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    MatchAny,
     MatchValue,
     PointStruct,
     VectorParams,
@@ -170,10 +171,11 @@ class VectorDBClient:
         top_k: int = 5,
         threshold: float = 0.5,
         user_id: Optional[str] = None,
+        excluded_file_ids: Optional[set[str]] = None,
     ) -> list[dict]:
         """Search for similar vectors."""
         try:
-            query_filter = self._user_filter(user_id)
+            query_filter = self._build_filter(user_id, excluded_file_ids)
             if hasattr(self.client, "query_points"):
                 response = await self.client.query_points(
                     collection_name=self.collection_name,
@@ -215,6 +217,7 @@ class VectorDBClient:
         query: str,
         limit: int = 5,
         user_id: Optional[str] = None,
+        excluded_file_ids: Optional[set[str]] = None,
     ) -> list[dict]:
         """Search payload text for exact keyword matches.
 
@@ -226,6 +229,7 @@ class VectorDBClient:
             if not query_terms:
                 return []
 
+            scroll_filter = self._build_filter(user_id, excluded_file_ids)
             results = []
             offset = None
             while True:
@@ -233,7 +237,7 @@ class VectorDBClient:
                     collection_name=self.collection_name,
                     limit=100,
                     offset=offset,
-                    scroll_filter=self._user_filter(user_id),
+                    scroll_filter=scroll_filter,
                     with_payload=True,
                     with_vectors=False,
                 )
@@ -265,6 +269,7 @@ class VectorDBClient:
         section_number: str,
         limit: int = 20,
         user_id: Optional[str] = None,
+        excluded_file_ids: Optional[set[str]] = None,
     ) -> list[dict]:
         """Return all chunks belonging to a named section (e.g. '3.6' or 'A').
 
@@ -294,7 +299,12 @@ class VectorDBClient:
             ]
             if user_id:
                 must.append(FieldCondition(key="user_id", match=MatchValue(value=str(user_id))))
-            section_filter = Filter(must=must)
+            must_not = (
+                [FieldCondition(key="file_id", match=MatchAny(any=[str(f) for f in excluded_file_ids]))]
+                if excluded_file_ids
+                else None
+            )
+            section_filter = Filter(must=must, must_not=must_not)
 
             offset = None
             while True:
@@ -320,13 +330,14 @@ class VectorDBClient:
                 heading_re = re.compile(
                     rf"(?im)^\s*(?:section|sec|clause)\s+{re.escape(str(section_number))}\b(?!-\w)"
                 )
+                heading_scan_filter = self._build_filter(user_id, excluded_file_ids)
                 offset = None
                 while True:
                     points, offset = await self.client.scroll(
                         collection_name=self.collection_name,
                         limit=100,
                         offset=offset,
-                        scroll_filter=self._user_filter(user_id),
+                        scroll_filter=heading_scan_filter,
                         with_payload=True,
                         with_vectors=False,
                     )
@@ -348,6 +359,7 @@ class VectorDBClient:
         phrase: str,
         limit: int = 20,
         user_id: Optional[str] = None,
+        excluded_file_ids: Optional[set[str]] = None,
     ) -> list[dict]:
         """Return chunks whose text contains PHRASE in its UPPERCASE form.
 
@@ -366,6 +378,7 @@ class VectorDBClient:
                 r"\b" + r"\s+".join(re.escape(t.upper()) for t in tokens) + r"\b"
             )
 
+            scroll_filter = self._build_filter(user_id, excluded_file_ids)
             results: list[dict] = []
             offset = None
             while True:
@@ -373,7 +386,7 @@ class VectorDBClient:
                     collection_name=self.collection_name,
                     limit=100,
                     offset=offset,
-                    scroll_filter=self._user_filter(user_id),
+                    scroll_filter=scroll_filter,
                     with_payload=True,
                     with_vectors=False,
                 )
@@ -392,8 +405,19 @@ class VectorDBClient:
             logger.error(f"Error searching heading '{phrase}': {e}")
             return []
 
-    async def _get_all_documents(self, user_id: Optional[str] = None) -> list[dict]:
-        """Return all point payloads for lightweight lexical retrieval."""
+    async def _get_all_documents(
+        self,
+        user_id: Optional[str] = None,
+        excluded_file_ids: Optional[set[str]] = None,
+    ) -> list[dict]:
+        """Return all point payloads for lightweight lexical retrieval.
+
+        ``excluded_file_ids`` (disabled files) are filtered by Qdrant when provided.
+        The BM25 corpus deliberately leaves this None so its cached index stays
+        complete and current across admins toggling status; BM25 drops disabled
+        chunks when it selects its top matches instead.
+        """
+        scroll_filter = self._build_filter(user_id, excluded_file_ids)
         documents = []
         offset = None
 
@@ -402,7 +426,7 @@ class VectorDBClient:
                 collection_name=self.collection_name,
                 limit=100,
                 offset=offset,
-                scroll_filter=self._user_filter(user_id),
+                scroll_filter=scroll_filter,
                 with_payload=True,
                 with_vectors=False,
             )
@@ -479,17 +503,38 @@ class VectorDBClient:
         return diagrams[:limit]
 
     @staticmethod
-    def _user_filter(user_id: Optional[str]) -> Optional[Filter]:
-        if not user_id:
-            return None
-        return Filter(
-            must=[
+    def _build_filter(
+        user_id: Optional[str],
+        excluded_file_ids: Optional[set[str]] = None,
+    ) -> Optional[Filter]:
+        """Build a Qdrant filter that scopes to a user and excludes disabled files.
+
+        ``excluded_file_ids`` are files an admin has disabled (file_status = False).
+        They are added as a ``must_not`` on ``file_id`` so their chunks are removed
+        by Qdrant itself — the search/scroll ``limit`` is then spent entirely on
+        active chunks, instead of dropping disabled chunks after the fact (which
+        could leave a query with too few, or zero, usable results).
+        """
+        must = []
+        if user_id:
+            must.append(FieldCondition(key="user_id", match=MatchValue(value=str(user_id))))
+
+        must_not = []
+        if excluded_file_ids:
+            must_not.append(
                 FieldCondition(
-                    key="user_id",
-                    match=MatchValue(value=str(user_id)),
+                    key="file_id",
+                    match=MatchAny(any=[str(fid) for fid in excluded_file_ids]),
                 )
-            ]
-        )
+            )
+
+        if not must and not must_not:
+            return None
+        return Filter(must=must or None, must_not=must_not or None)
+
+    @staticmethod
+    def _user_filter(user_id: Optional[str]) -> Optional[Filter]:
+        return VectorDBClient._build_filter(user_id, None)
 
     @staticmethod
     def _keyword_terms(text: str) -> list[str]:

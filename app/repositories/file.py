@@ -90,3 +90,15 @@ class FileRepository(BaseRepository[File]):
     async def update_file_status(self, file_id: uuid.UUID, file_status: bool) -> Optional[File]:
         """Update the file status flag."""
         return await self.update(file_id, file_status=file_status)
+
+    async def get_disabled_file_ids(self) -> set[str]:
+        """Return the ids of files whose status flag is disabled (file_status = False).
+
+        Chunks belonging to these files must be completely ignored during chat
+        retrieval, so callers use this set to drop matched chunks before they reach
+        consolidation. Ids are returned as strings to compare directly against the
+        ``file_id`` stored in each vector's payload.
+        """
+        stmt = select(File.id).where(File.file_status == False)  # noqa: E712
+        result = await self.session.execute(stmt)
+        return {str(file_id) for file_id in result.scalars().all()}
