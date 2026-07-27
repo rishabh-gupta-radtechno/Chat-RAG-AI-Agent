@@ -265,7 +265,7 @@ class Settings(BaseSettings):
         "http://localhost:8000",
         "http://localhost:4200",
         "http://radtech-001-site62.ntempurl.com",
-        "http://10.143.8.189:8000",
+        "http://10.143.8.189:4200",
     ]
 
     class Config:
