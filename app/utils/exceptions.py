@@ -8,10 +8,10 @@ from fastapi import HTTPException, status
 class InvalidCredentialsException(HTTPException):
     """Raised when credentials are invalid."""
 
-    def __init__(self):
+    def __init__(self, detail: str = "Invalid email or password"):
         super().__init__(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+            detail=detail,
             headers={"WWW-Authenticate": "Bearer"},
         )
 

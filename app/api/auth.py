@@ -71,7 +71,7 @@ async def login_phone(
         tokens = await auth_service.login_with_phone(request.phone, request.password)
         return tokens
     except ValueError as e:
-        raise InvalidCredentialsException()
+        raise InvalidCredentialsException(detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
