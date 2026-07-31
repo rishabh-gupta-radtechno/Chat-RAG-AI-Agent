@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.schemas import TokenResponse, UserLoginRequest, UserRegisterRequest, UserResponse, UserUpdateRequest, EmailStr
+from app.schemas import PhoneLoginRequest, TokenResponse, UserLoginRequest, UserRegisterRequest, UserResponse, UserUpdateRequest, EmailStr
 from app.services.auth import AuthService
 from app.utils.exceptions import InvalidCredentialsException, UserAlreadyExistsException, UnauthorizedException
 from app.core.logging import get_logger
@@ -53,6 +53,22 @@ async def login(
     try:
         auth_service = AuthService(session)
         tokens = await auth_service.login(request.email, request.password)
+        return tokens
+    except ValueError as e:
+        raise InvalidCredentialsException()
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.post("/loginphone", response_model=TokenResponse)
+async def login_phone(
+    request: PhoneLoginRequest,
+    session: AsyncSession = Depends(get_db),
+):
+    """Login user with phone number and get JWT tokens."""
+    try:
+        auth_service = AuthService(session)
+        tokens = await auth_service.login_with_phone(request.phone, request.password)
         return tokens
     except ValueError as e:
         raise InvalidCredentialsException()

@@ -79,6 +79,34 @@ class AuthService:
             refresh_token=refresh_token,
         )
 
+    async def login_with_phone(self, phone: str, password: str) -> TokenResponse:
+        """Login user by phone number and return tokens."""
+        # Mobile numbers are stored as BigInteger, so normalise the incoming value
+        digits = "".join(ch for ch in str(phone) if ch.isdigit())
+        if not digits:
+            raise ValueError("Invalid phone number or password")
+
+        user = await self.user_repo.get_by_mobile(int(digits))
+        if not user:
+            raise ValueError("Invalid phone number or password")
+
+        # Verify password
+        if not verify_password(password, user.password_hash):
+            raise ValueError("Invalid phone number or password")
+
+        # Check if user is active
+        if not user.is_active or user.is_deleted:
+            raise ValueError("User account is inactive")
+
+        # Create tokens
+        access_token = create_access_token(str(user.id))
+        refresh_token = create_refresh_token(str(user.id))
+
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+        )
+
     async def update_user(self, user_id: uuid.UUID, update_in: UserUpdateRequest) -> Optional[UserResponse]:
         """Update user details selectively."""
         update_data = update_in.model_dump(exclude_unset=True)

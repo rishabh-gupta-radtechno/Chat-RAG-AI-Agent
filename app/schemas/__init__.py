@@ -29,6 +29,13 @@ class UserLoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+class PhoneLoginRequest(BaseModel):
+    """Phone number login request schema."""
+
+    phone: str = Field(..., min_length=10, max_length=15)
+    password: str
+
+
 class UserUpdateRequest(BaseModel):
     """User update request schema for partial updates."""
 
