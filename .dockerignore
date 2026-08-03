@@ -1,3 +1,4 @@
+# --- Python / virtualenv (huge: ~50k files; must never enter the build context) ---
 .dockerignore
 __pycache__
 *.pyc
@@ -7,13 +8,29 @@ __pycache__
 env/
 venv/
 .venv
+.venv/
 *.egg-info/
 dist/
 build/
 .pytest_cache/
 .coverage
+
+# --- Editors / VCS ---
 .vscode/
 .idea/
 .git/
 .gitignore
 README.md
+
+# --- Runtime data: provided by the `uploads_data` volume at runtime, NOT baked
+#     into the image (these are large user-uploaded PDFs). The Dockerfile's
+#     `mkdir -p static/uploads` recreates the empty directory. ---
+static/uploads/
+
+# --- Dev / test / docs: not needed in the runtime image ---
+tests/
+loadtest/
+docs/
+*.md
+*.log
+logs/
