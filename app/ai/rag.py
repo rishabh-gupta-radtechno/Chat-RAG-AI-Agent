@@ -82,15 +82,27 @@ class RAGPipeline:
         try:
             from sentence_transformers import CrossEncoder
             from app.core.device import torch_device
+            device = torch_device()
             _RERANKER_SINGLETON = CrossEncoder(
                 settings.reranker_model,
                 max_length=settings.reranker_max_length,
-                device=torch_device(),
+                device=device,
             )
+            # On GPU, run the cross-encoder in half precision. bge-reranker-v2-m3 is
+            # ~568M params (~2.3GB in fp32); fp16 halves that to ~1.1GB so it fits
+            # alongside the chat model + KV cache on a small (e.g. 6GB) GPU. Best
+            # effort — if .half() isn't supported, keep fp32 rather than losing the
+            # reranker (fp16 is skipped on CPU, where it would be slower/unsupported).
+            if device == "cuda":
+                try:
+                    _RERANKER_SINGLETON.model.half()
+                    logger.info("Reranker cast to fp16 for GPU memory headroom")
+                except Exception as exc:
+                    logger.warning("Could not cast reranker to fp16 (%s); keeping fp32", exc)
             self._reranker = _RERANKER_SINGLETON
             logger.info(
-                "Reranking enabled (cross-encoder '%s' loaded once, shared; max_length=%d)",
-                settings.reranker_model, settings.reranker_max_length,
+                "Reranking enabled (cross-encoder '%s' loaded once, shared; max_length=%d, device=%s)",
+                settings.reranker_model, settings.reranker_max_length, device,
             )
         except ImportError:
             _RERANKER_FAILED = True

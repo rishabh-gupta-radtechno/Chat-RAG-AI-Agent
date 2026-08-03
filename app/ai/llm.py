@@ -59,6 +59,11 @@ class OllamaClient:
             raise RuntimeError("Vision model disabled for this document after repeated failures")
 
         b64 = base64.b64encode(image_bytes).decode("ascii")
+        vision_options = {"temperature": temperature}
+        # Keep the (heavy) vision model off the GPU when configured, so it can't
+        # evict the chat model + reranker from a small GPU's VRAM. Negative = auto.
+        if settings.ollama_vision_num_gpu >= 0:
+            vision_options["num_gpu"] = settings.ollama_vision_num_gpu
         try:
             response = await self.client.post(
                 f"{self.base_url.rstrip('/')}/api/generate",
@@ -66,7 +71,7 @@ class OllamaClient:
                     "model": self.vision_model,
                     "prompt": prompt,
                     "images": [b64],
-                    "options": {"temperature": temperature},
+                    "options": vision_options,
                     "keep_alive": "5m",
                     "stream": False,
                 },
@@ -168,10 +173,16 @@ class OllamaClient:
         # borderline-oversized input is trimmed rather than 500'd. The RAG layer
         # splits chunks by token budget before we get here, so truncation is only
         # a last-resort guard against an under-estimate — it should rarely fire.
+        embed_options = {"num_ctx": settings.embed_num_ctx}
+        # Pin the embedder off the GPU (num_gpu=0) on small-VRAM hosts so the chat
+        # model + its KV cache + the reranker own the GPU; bge-m3 is fast on CPU
+        # and runs on every query. Negative config value = let Ollama auto-decide.
+        if settings.ollama_embed_num_gpu >= 0:
+            embed_options["num_gpu"] = settings.ollama_embed_num_gpu
         payload = {
             "model": self.embedding_model,
             "truncate": True,
-            "options": {"num_ctx": settings.embed_num_ctx},
+            "options": embed_options,
         }
 
         if path == "/api/embed":

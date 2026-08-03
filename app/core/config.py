@@ -52,11 +52,20 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"
-    ollama_chat_model: str = "qwen3:8b"
+    ollama_chat_model: str = "qwen3:4b"
     ollama_embedding_model: str = "bge-m3"
     ollama_embeddings_path: str = "/api/embeddings"
     ollama_timeout_seconds: int = 120
     ollama_num_ctx: int = 4096  # must be larger than the largest prompt sent
+    # Per-model GPU layer offload (Ollama `num_gpu`). On a small GPU (e.g. 6GB) the
+    # chat model + its KV cache + the reranker are what we want resident, so the
+    # embedding and vision models are pinned OFF the GPU to keep that VRAM free.
+    #   >= 0  -> pass this many layers to num_gpu (0 = CPU only)
+    #   < 0   -> omit num_gpu entirely and let Ollama auto-decide
+    # Embeddings are cheap on CPU, so default them to CPU. Vision is ingest-only and
+    # heavy, so leave it on auto (set OLLAMA_VISION_NUM_GPU=0 to force it to CPU too).
+    ollama_embed_num_gpu: int = 0
+    ollama_vision_num_gpu: int = -1
     # Cap response length. -1 = unbounded, which on CPU lets a reasoning model run
     # for thousands of tokens and blow past the request timeout; bound it instead.
     ollama_num_predict: int = 1024
