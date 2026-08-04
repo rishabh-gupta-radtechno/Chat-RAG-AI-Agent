@@ -88,7 +88,9 @@ services:
       - SYNC_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/chat_rag_db
       - QDRANT_URL=http://qdrant:6333
       - OLLAMA_BASE_URL=http://ollama:11434
-      - OLLAMA_CHAT_MODEL=qwen3:8b
+      # qwen3:4b fully fits + runs 100% on a 6GB GPU (RTX 3050); qwen3:8b (~6.6GB)
+      # only partially offloads there and falls back to a slow CPU/GPU split.
+      - OLLAMA_CHAT_MODEL=qwen3:4b
       # Use the modern /api/embed endpoint: unlike the legacy /api/embeddings, it
       # honors options.num_ctx (8192) and truncate=true, so a long table chunk is
       # truncated to the window instead of 500'ing "input exceeds context length"
@@ -96,6 +98,10 @@ services:
       # ("input" vs "prompt") based on this path.
       - OLLAMA_EMBEDDINGS_PATH=/api/embed
       - OLLAMA_EMBEDDING_MODEL=bge-m3
+      # Pin bge-m3 to CPU so the 6GB GPU is reserved for qwen3:4b + KV + the
+      # reranker; embeddings are cheap on CPU and run on every query. Set to -1 on
+      # a larger GPU to let Ollama offload the embedder too.
+      - OLLAMA_EMBED_NUM_GPU=0
       - OLLAMA_TIMEOUT_SECONDS=600
       - OLLAMA_NUM_CTX=4096
       # Cap response length so a reasoning model can't run unbounded on CPU and
