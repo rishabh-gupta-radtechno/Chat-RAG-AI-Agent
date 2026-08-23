@@ -28,9 +28,12 @@ services:
   api:
     build:
       args:
-        # Match this to the host's CUDA/driver. cu124 works with recent drivers;
-        # use cu121 / cu126 etc. if that's what the host supports.
-        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu124
+        # Match this to the host's GPU architecture, not just its driver. cu128 is
+        # the floor for Blackwell (RTX 50-series, sm_120) — a cu124 build loads but
+        # then dies with "no kernel image is available for execution on the device".
+        # cu128 is backward compatible with Ampere/Ada, so it is the safe default;
+        # only drop to cu121/cu124 for an older host whose driver predates 12.8.
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
     deploy:
       resources:
         reservations:
