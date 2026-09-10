@@ -120,6 +120,16 @@ services:
       # so Docling/transformers models download once, not on every recreate.
       - HF_TOKEN=${HF_TOKEN:-}
       - HF_HOME=/root/.cache/huggingface
+      # Docling 2.118 runs its layout model through torch.compile. On CPU the
+      # Inductor backend generates C++ and needs g++ at RUNTIME, which the slim
+      # runtime image does not ship (only the builder stage installs g++, and it
+      # is not under /usr/local so the COPY does not bring it along). Without
+      # this the layout stage died with InvalidCxxCompiler and every PDF fell
+      # back to traditional extraction — no TableFormer tables, no formula
+      # enrichment, no layout reading order. Disabling dynamo runs the model
+      # eagerly (slightly slower inference, no compile step) instead of adding a
+      # ~200MB toolchain to the image.
+      - TORCHDYNAMO_DISABLE=1
       - DEBUG=False
       - ENV=production
     volumes:

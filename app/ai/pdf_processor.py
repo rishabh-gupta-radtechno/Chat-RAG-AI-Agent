@@ -29,6 +29,30 @@ _MIN_EMBEDDED_IMAGE_SIDE = 50
 
 _TESSERACT_LANG_MAP = {"en": "eng", "hi": "hin", "ch": "chi_sim"}
 
+_TORCH_COMPILE_RELAXED = False
+
+
+def _relax_torch_compile() -> None:
+    """Let a failed torch.compile fall back to eager instead of aborting Docling.
+
+    Docling 2.118 runs its layout model through torch.compile. On CPU the
+    Inductor backend generates C++ and needs g++ at runtime; the slim runtime
+    image has none, so the layout stage raised InvalidCxxCompiler and dropped
+    every PDF to traditional extraction. TORCHDYNAMO_DISABLE=1 (docker-compose)
+    is the primary switch — this is the safety net for any environment that
+    misses it: compile errors degrade to eager execution instead of raising.
+    """
+    global _TORCH_COMPILE_RELAXED
+    if _TORCH_COMPILE_RELAXED:
+        return
+    _TORCH_COMPILE_RELAXED = True
+    try:
+        import torch._dynamo as torch_dynamo
+
+        torch_dynamo.config.suppress_errors = True
+    except Exception as exc:  # torch missing/renamed the flag — nothing to relax
+        logger.debug("Could not relax torch.compile error handling: %s", exc)
+
 
 class PDFProcessor:
     """Extract page-level multimodal data from PDF documents."""
@@ -159,6 +183,8 @@ class PDFProcessor:
             from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
         except ImportError as exc:
             raise ImportError("docling is required for advanced PDF processing") from exc
+
+        _relax_torch_compile()
 
         # Configure Docling pipeline options
         pipeline_options = PdfPipelineOptions()

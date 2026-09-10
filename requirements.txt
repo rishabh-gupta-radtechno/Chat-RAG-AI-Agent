@@ -33,7 +33,11 @@ paddlepaddle>=3.0
 paddleocr>=3.1
 camelot-py
 pdfplumber
-docling
+# Pinned: this is the version running in production. Unpinned, a docling
+# release can swap the extraction pipeline under us — 2.118 already runs its
+# layout model through torch.compile, which needs TORCHDYNAMO_DISABLE=1 on a
+# compiler-less runtime image (see docker-compose.yml).
+docling==2.118.0
 # Enables Docling's RapidOCR (ONNX backend). Without it Docling's OCR engine
 # fails to initialize ("rapidocr cannot be used because onnxruntime is not
 # installed" -> "Unsupported configuration: torch.PP-OCRv6.det.small"), which
