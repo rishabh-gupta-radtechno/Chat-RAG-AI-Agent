@@ -405,8 +405,8 @@ class PDFProcessor:
                     logger.debug("Docling table dataframe export failed: %s", exc)
                     break
             if df is not None:
-                header = [str(c).strip() for c in df.columns.tolist()]
-                rows = [[str(c).strip() for c in row] for row in df.values.tolist()]
+                header = [("" if c is None else str(c).strip()) for c in df.columns.tolist()]
+                rows = [[("" if c is None else str(c).strip()) for c in row] for row in df.values.tolist()]
 
             markdown = ""
             for call in (lambda: table.export_to_markdown(doc), lambda: table.export_to_markdown()):
@@ -1494,8 +1494,8 @@ class PDFProcessor:
                     data = table.data if hasattr(table, "data") else []
                     if not data:
                         continue
-                    header = [str(cell).strip() for cell in data[0]]
-                    rows = [[str(cell).strip() for cell in row] for row in data[1:]]
+                    header = [("" if cell is None else str(cell).strip()) for cell in data[0]]
+                    rows = [[("" if cell is None else str(cell).strip()) for cell in row] for row in data[1:]]
                     tables.append(
                         {
                             "title": f"Page {page_number} table {table_index + 1}",
@@ -1525,9 +1525,9 @@ class PDFProcessor:
             for table_index, raw_table in enumerate(extracted):
                 if not raw_table:
                     continue
-                header = [str(cell).strip() for cell in raw_table[0]]
+                header = [("" if cell is None else str(cell).strip()) for cell in raw_table[0]]
                 rows = [
-                    [str(cell).strip() for cell in row]
+                    [("" if cell is None else str(cell).strip()) for cell in row]
                     for row in raw_table[1:]
                     if row and any(cell is not None for cell in row)
                 ]

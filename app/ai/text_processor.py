@@ -2,6 +2,7 @@
 Text processing utilities including chunking and preprocessing.
 """
 
+import os
 import re
 from typing import Dict, List, Optional
 
@@ -325,8 +326,8 @@ class TextProcessor:
         Rejects TableFormer/camelot false positives where ordinary paragraph text
         was forced into a grid (e.g. "T | he changeover Valve ...").
         """
-        header = [str(h).strip() for h in (table.get("header") or [])]
-        rows = [[str(c).strip() for c in r] for r in (table.get("rows") or [])]
+        header = [("" if h is None else str(h).strip()) for h in (table.get("header") or [])]
+        rows = [[("" if c is None else str(c).strip()) for c in r] for r in (table.get("rows") or [])]
 
         # Rule 1 — structure: a table needs >= 2 columns and >= 2 rows.
         ncols = max([len(header)] + [len(r) for r in rows] or [0])
@@ -409,14 +410,34 @@ class TextProcessor:
 
     @staticmethod
     def table_to_markdown(header: list, rows: list) -> str:
-        """Render a table as GitHub-flavored Markdown (header row repeated by caller)."""
-        header = [str(h).strip() for h in (header or [])]
-        width = len(header) or max((len(r) for r in rows), default=0)
+        """Render a table as GitHub-flavored Markdown (header row repeated by caller).
+
+        The grid is as wide as its widest row, never truncated to the header: a
+        header cell spanning two columns ("PARTICULARS" over "2.13." and "Gross
+        Load") leaves the extracted header shorter than the rows, and cutting rows
+        to the header's width dropped the LAST column — the right-hand values (e.g.
+        Wagon-B, or a value merged across both wagons). The short header is right-
+        aligned over the value columns, since spanned headers sit over the leading
+        label columns.
+        """
+        header = [("" if h is None else str(h).strip()) for h in (header or [])]
+
+        def _used_width(row: list) -> int:
+            # Trailing empty cells are extraction padding, not a column: widening
+            # for them would shift a correctly-aligned header off its values.
+            cells = [("" if c is None else str(c).strip()) for c in row]
+            while cells and cells[-1] in ("", "None"):
+                cells.pop()
+            return len(cells)
+
+        width = max([len(header)] + [_used_width(r) for r in (rows or [])])
         if not width:
             return ""
+        if header and len(header) < width:
+            header = [""] * (width - len(header)) + header
 
         def _fmt(cells: list) -> str:
-            cells = [str(c).strip().replace("|", "\\|").replace("\n", " ") for c in cells]
+            cells = [("" if c is None else str(c)).strip().replace("|", "\\|").replace("\n", " ") for c in cells]
             cells += [""] * (width - len(cells))
             return "| " + " | ".join(cells[:width]) + " |"
 
@@ -430,8 +451,8 @@ class TextProcessor:
     @staticmethod
     def _row_to_semantic(header: list, row: list) -> str:
         """One row as key=value pairs, e.g. ``Part=BC, Pressure=5 kg/cm²``."""
-        cells = [str(c).strip() for c in row]
-        header = [str(h).strip() for h in (header or [])]
+        cells = [("" if c is None else str(c).strip()) for c in row]
+        header = [("" if h is None else str(h).strip()) for h in (header or [])]
         if header and len(cells) == len(header):
             return ", ".join(f"{h}={v}" for h, v in zip(header, cells) if v)
         return " | ".join(c for c in cells if c)
@@ -536,13 +557,18 @@ class TextProcessor:
             kept.append(line)
         return "\n".join(kept)
 
-    def _split_into_sections(self, page_texts: list) -> list:
+    def _split_into_sections(self, page_texts: list, page_sections: Optional[dict] = None) -> list:
         """Split cleaned per-page text into heading-bounded, single-page segments.
 
         The current section carries across page breaks (so its number/title are
         kept), but a new page always starts a NEW segment tagged with that page,
         so a chunk never mixes content from two pages. The heading text itself is
         not duplicated into the body — build_pdf_chunks prepends the section label.
+
+        When ``page_sections`` is given it is filled with ``{page_number: [(line,
+        (number, title)), ...]}`` — every line of the page with the section in
+        effect at it — so a page's tables can be attributed to the section they
+        start in (see _table_section).
         """
         segments: list = []
         cur_num: Optional[str] = None
@@ -573,6 +599,7 @@ class TextProcessor:
             _flush()
             current = _new_segment(page)
             lines = [ln.strip() for ln in page["text"].splitlines() if ln.strip()]
+            line_sections: list = []
             i = 0
             while i < len(lines):
                 line = lines[i]
@@ -591,7 +618,10 @@ class TextProcessor:
                     current = _new_segment(page)  # heading supplied by the chunk prefix
                 else:
                     current["lines"].append(line)
+                line_sections.append((line, (cur_num, cur_title)))
                 i += 1
+            if page_sections is not None:
+                page_sections[page["page_number"]] = line_sections
         _flush()
         return segments
 
@@ -806,7 +836,8 @@ class TextProcessor:
 
         # Chunk text by section (heading-bounded, spanning pages); the section
         # title is stored inside the chunk text and in metadata.
-        for seg_index, seg in enumerate(self._split_into_sections(page_texts), start=1):
+        page_sections: dict = {}
+        for seg_index, seg in enumerate(self._split_into_sections(page_texts, page_sections), start=1):
             number, title = seg["section_number"], seg["section_title"]
             label = f"Section {number} {title}".strip() if (number or title) else ""
             for part_index, chunk_text in enumerate(self.chunk_text_by_words(seg["text"]), start=1):
@@ -824,6 +855,22 @@ class TextProcessor:
                         "chunk_id": f"{file_name}|sec{seg_index:03d}|{seg['content_type']}|{part_index:03d}",
                     },
                 )
+
+        # A table chunk is only a grid of values: it never states which document or
+        # section it belongs to ("Table: Table | PARTICULARS | Wagon-A ..."), so a
+        # question naming either ("BCACBM ... Section 2") could not find it. Tables
+        # are labelled with the document name and the section in effect on their
+        # page — carried forward over table-only pages, the same way section text
+        # carries across page breaks.
+        document_label = self._document_label(file_name)
+        carried_section: tuple = (None, None)
+        section_entering_page: dict = {}
+        for page in sorted(page_documents, key=lambda p: p.get("page_number", 0) or 0):
+            page_number = page.get("page_number", 0)
+            section_entering_page[page_number] = carried_section
+            line_sections = page_sections.get(page_number) or []
+            if line_sections:
+                carried_section = line_sections[-1][1]
 
         # Tables and diagrams stay anchored to their page.
         for page in page_documents:
@@ -855,18 +902,30 @@ class TextProcessor:
                 # any source (Docling / pdfplumber / vision) lands as queryable JSON —
                 # the table counterpart of charts' structured_data. The embedded TEXT
                 # stays markdown + key=value (better for retrieval); JSON is metadata only.
-                table_header = [str(h).strip() for h in table.get("header", [])]
-                table_rows = [[str(c).strip() for c in row] for row in (table.get("rows") or [])]
+                table_header = [("" if h is None else str(h).strip()) for h in table.get("header", [])]
+                table_rows = [[("" if c is None else str(c).strip()) for c in row] for row in (table.get("rows") or [])]
                 table_markdown = self.table_to_markdown(table_header, table_rows)
+                section_number, section_title = self._table_section(
+                    table,
+                    page_sections.get(page_number) or [],
+                    section_entering_page.get(page_number, (None, None)),
+                )
+                section_label = (
+                    f"Section {section_number} {section_title}".strip()
+                    if (section_number or section_title) else ""
+                )
+                table_prefix = "\n".join(x for x in (document_label, section_label) if x)
                 for part_index, chunk_text in enumerate(self.chunk_table_text(table), start=1):
                     _add_chunk(
-                        chunk_text,
+                        f"{table_prefix}\n{chunk_text}" if table_prefix else chunk_text,
                         {
                             "file_name": file_name,
                             "page_number": page_number,
                             "document_page_number": document_page_number,
                             "content_type": "table",
                             "page_type": page_type,
+                            "section_number": section_number,
+                            "section_title": section_title,
                             "table_id": table_id,
                             "table_title": table_title,
                             "table_markdown": table_markdown,
@@ -989,6 +1048,50 @@ class TextProcessor:
         return chunks
 
     @staticmethod
+    def _table_section(table: dict, line_sections: list, entering: tuple) -> tuple:
+        """The (number, title) of the section a table starts in.
+
+        A page's text layer usually contains the table's own rows, and numbered
+        rows ("2.13. Gross Load", "2.17 Operating Speed") read as sub-headings — so
+        the section at the END of the page is the table's last row, not the section
+        it belongs to. Instead, find the first page line holding one of the table's
+        leading text cells and take the section in effect there. Falls back to the
+        last section on the page (a heading usually precedes its table), then to the
+        section carried in from earlier pages (a table-only or scanned page).
+        """
+        def norm(text: str) -> str:
+            return " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+
+        cells = list(table.get("header") or [])
+        for row in (table.get("rows") or [])[:3]:
+            cells.extend(row)
+        probes = [
+            norm(cell) for cell in cells
+            if cell is not None and str(cell).strip().lower() != "none"
+            and len(re.findall(r"[A-Za-z]", str(cell))) >= 4
+        ]
+        if probes and line_sections:
+            for line, section in line_sections:
+                normalized = norm(line)
+                if any(probe and probe in normalized for probe in probes):
+                    return section
+        if line_sections:
+            return line_sections[-1][1]
+        return entering
+
+    @staticmethod
+    def _document_label(file_name: str) -> str:
+        """Readable document name from an upload's filename, for chunk labels.
+
+        "20260910_073017_G-106 BCACBM manual .pdf" -> "G-106 BCACBM manual": drops
+        the upload timestamp prefix and the extension(s), and turns underscores into
+        spaces so the name's words are searchable.
+        """
+        name = re.sub(r"^\d{8}_\d{6}_", "", os.path.basename(file_name or ""))
+        name = re.sub(r"(\.(pdf|pptx?|docx?|xlsx?|txt))+$", "", name, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", name.replace("_", " ")).strip()
+
+    @staticmethod
     def extract_document_page_number(text: str) -> Optional[int]:
         matches = re.findall(r"\bPage\s+(\d+)\b", text or "", flags=re.IGNORECASE)
         if not matches:
@@ -1008,7 +1111,7 @@ class TextProcessor:
         as an upper bound. A wide table therefore splits into more, smaller chunks
         and can never overflow the embedding context.
         """
-        header = [str(h).strip() for h in table.get("header", [])]
+        header = [("" if h is None else str(h).strip()) for h in table.get("header", [])]
         rows = table.get("rows", []) or []
         title = self._table_title(table)
 

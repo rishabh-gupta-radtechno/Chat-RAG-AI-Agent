@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Optional
 
 from app.ai.llm import OllamaClient
+from app.ai.text_processor import TextProcessor
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -102,7 +103,15 @@ class ReActAgent:
                 if table_key in seen_tables:
                     continue
                 seen_tables.add(table_key)
-                body = doc["table_markdown"].strip()
+                # Re-render from the stored grid when present: markdown persisted by
+                # older ingests truncated rows to the header's width and lost the
+                # last column, while table_header/table_rows kept every cell.
+                if doc.get("table_rows"):
+                    body = TextProcessor.table_to_markdown(
+                        doc.get("table_header") or [], doc["table_rows"]
+                    ).strip() or doc["table_markdown"].strip()
+                else:
+                    body = doc["table_markdown"].strip()
                 source_label = f'table "{table_title}"'
             else:
                 body = (doc.get("chunk_text") or "").strip()
