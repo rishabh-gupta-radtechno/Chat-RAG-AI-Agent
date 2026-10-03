@@ -237,6 +237,12 @@ class Settings(BaseSettings):
     # enough true candidates to surface a specific row from a big table.
     vector_search_top_k: int = 12
     similarity_threshold: float = 0.5
+    # Section rescue ("section 6" in the question): how many of that section's
+    # chunks are scanned (within the files hybrid search surfaced), and how many of
+    # the best-matching ones receive the decisive section bonus. A bare section
+    # number exists in most manuals, so rescuing them all buries the real answer.
+    section_search_limit: int = 200
+    section_rescue_max: int = 3
     retrieval_neighbor_pages: int = 1
     # How many same-page chunks ride along with each retrieved chunk. They are
     # emitted directly after the chunk they support, so they compete for the

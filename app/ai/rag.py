@@ -469,18 +469,52 @@ class RAGPipeline:
             # Section-scoped retrieval: when the query names a section (e.g.
             # "section 3.6"), pull that whole section by exact metadata match so
             # it is returned even if the bare reference has little to embed.
+            #
+            # A bare number ("Section 6") is a section in nearly every manual, and the
+            # rescue bonus outranks everything, so an unscoped match filled the whole
+            # context with OTHER manuals' section 6 (scroll order, not relevance). So:
+            #   * scope it to the files the hybrid channels surfaced — the documents
+            #     the question is about — falling back to the whole corpus only when
+            #     none of them has that section (a "Section A" slide whose deck
+            #     nothing else matched);
+            #   * rank the section's chunks by how well they match the question and
+            #     rescue only the best section_rescue_max of them, so the bonus lands
+            #     on the right document's section instead of crowding out the rest.
             section_documents = []
             section_ref = self._section_reference(query)
             if section_ref:
-                section_documents = await self.vector_db.search_by_section(
-                    section_ref,
-                    limit=top_k * 2,
-                    user_id=str(retrieval_user_id) if retrieval_user_id else None,
-                    excluded_file_ids=excluded_file_ids,
-                )
+                section_user_id = str(retrieval_user_id) if retrieval_user_id else None
+                hybrid_documents = semantic_documents + bm25_documents + keyword_documents
+                hybrid_file_ids = {
+                    str(document.get("file_id"))
+                    for document in hybrid_documents
+                    if document.get("file_id")
+                }
+                if hybrid_file_ids:
+                    section_documents = await self.vector_db.search_by_section(
+                        section_ref,
+                        limit=settings.section_search_limit,
+                        user_id=section_user_id,
+                        excluded_file_ids=excluded_file_ids,
+                        file_ids=hybrid_file_ids,
+                    )
+                if not section_documents:
+                    section_documents = await self.vector_db.search_by_section(
+                        section_ref,
+                        limit=settings.section_search_limit,
+                        user_id=section_user_id,
+                        excluded_file_ids=excluded_file_ids,
+                    )
+                matched = len(section_documents)
+                section_documents = self._rank_section_documents(
+                    section_documents, query, hybrid_documents, section_ref
+                )[: max(1, settings.section_rescue_max)]
                 for document in section_documents:
                     document["section_match"] = True
-                logger.info("Section '%s' filter matched %d chunk(s)", section_ref, len(section_documents))
+                logger.info(
+                    "Section '%s' matched %d chunk(s); rescuing top %d",
+                    section_ref, matched, len(section_documents),
+                )
 
             # Heading-scoped retrieval: when the query quotes an ALL-CAPS heading
             # ("MUST CHANGE ITEMS") but not a numbered/lettered section, pull the
@@ -1004,6 +1038,56 @@ class RAGPipeline:
             document_id: score / best_possible
             for document_id, score in scores.items()
         }
+
+    def _rank_section_documents(
+        self,
+        section_documents: list[dict],
+        query: str,
+        hybrid_documents: list[dict],
+        section_ref: str,
+    ) -> list[dict]:
+        """Pick the named section's chunks that best answer the question.
+
+        The section filter only says "this chunk is in section N"; with a bare
+        number that holds for dozens of chunks across many manuals. A section chunk
+        the hybrid channels ALSO ranked is corroborated — it is in the named section
+        and about the question — so when any exist, only those are returned (best
+        fused first). The uncorroborated ones are returned only when none are, which
+        is the case the rescue exists for: a "Section A" slide with almost nothing
+        to embed. Those are ordered by lexical overlap, then the question naming the
+        document.
+
+        Hybrid hits are merged in directly because the section scroll is bounded and
+        in storage order, so it can stop before reaching the corroborated chunk.
+        """
+        candidates: dict[str, dict] = {}
+        for document in hybrid_documents:
+            if str(document.get("section_number") or "").lower() == str(section_ref).lower():
+                candidates.setdefault(str(document.get("id")), document)
+        for document in section_documents:
+            candidates.setdefault(str(document.get("id")), document)
+
+        fused = self._fuse_channels([hybrid_documents]) if hybrid_documents else {}
+        corroborated = [
+            document for document_id, document in candidates.items()
+            if fused.get(document_id, 0.0) > 0
+        ]
+        if corroborated:
+            return sorted(
+                corroborated,
+                key=lambda document: fused.get(str(document.get("id")), 0.0),
+                reverse=True,
+            )
+
+        query_terms = self.vector_db._keyword_terms(query)
+        return sorted(
+            candidates.values(),
+            key=lambda document: (
+                self.vector_db._keyword_score(query_terms, document.get("chunk_text", "")),
+                self._filename_affinity(document.get("filename", ""), query_terms),
+            ),
+            reverse=True,
+        )
 
     @staticmethod
     def _filename_affinity(filename: str, query_terms: list[str]) -> float:

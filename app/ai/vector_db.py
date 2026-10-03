@@ -270,6 +270,7 @@ class VectorDBClient:
         limit: int = 20,
         user_id: Optional[str] = None,
         excluded_file_ids: Optional[set[str]] = None,
+        file_ids: Optional[set[str]] = None,
     ) -> list[dict]:
         """Return all chunks belonging to a named section (e.g. '3.6' or 'A').
 
@@ -282,9 +283,19 @@ class VectorDBClient:
              decks label sections alphabetically ("Section A", "SECTION B") which the
              numeric detector skips, so those carry no ``section_number`` metadata;
              this catches them by their heading line without any re-ingestion.
+
+        ``file_ids`` restricts both matchers to those files. A bare section number
+        ("Section 6") exists in nearly every manual, so an unscoped match returns an
+        arbitrary ``limit`` of them in scroll order; scoping to the files the query
+        is actually about keeps the right document's section inside the limit.
         """
         try:
             results: list[dict] = []
+            file_scope = (
+                [FieldCondition(key="file_id", match=MatchAny(any=[str(f) for f in file_ids]))]
+                if file_ids
+                else []
+            )
             seen: set = set()
 
             def add(point):
@@ -295,7 +306,8 @@ class VectorDBClient:
 
             # (1) Metadata exact match.
             must = [
-                FieldCondition(key="section_number", match=MatchValue(value=str(section_number)))
+                FieldCondition(key="section_number", match=MatchValue(value=str(section_number))),
+                *file_scope,
             ]
             if user_id:
                 must.append(FieldCondition(key="user_id", match=MatchValue(value=str(user_id))))
@@ -331,6 +343,11 @@ class VectorDBClient:
                     rf"(?im)^\s*(?:section|sec|clause)\s+{re.escape(str(section_number))}\b(?!-\w)"
                 )
                 heading_scan_filter = self._build_filter(user_id, excluded_file_ids)
+                if file_scope:
+                    heading_scan_filter = Filter(
+                        must=[*((heading_scan_filter.must or []) if heading_scan_filter else []), *file_scope],
+                        must_not=heading_scan_filter.must_not if heading_scan_filter else None,
+                    )
                 offset = None
                 while True:
                     points, offset = await self.client.scroll(
