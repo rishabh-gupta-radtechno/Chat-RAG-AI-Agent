@@ -1062,10 +1062,14 @@ class TextProcessor:
         A page's text layer usually contains the table's own rows, and numbered
         rows ("2.13. Gross Load", "2.17 Operating Speed") read as sub-headings — so
         the section at the END of the page is the table's last row, not the section
-        it belongs to. Instead, find the first page line holding one of the table's
-        leading text cells and take the section in effect there. Falls back to the
-        last section on the page (a heading usually precedes its table), then to the
-        section carried in from earlier pages (a table-only or scanned page).
+        it belongs to. Instead, find the page line holding the MOST of the table's
+        leading text cells (the header/first rows; earliest on a tie) and take the
+        section in effect there. Counting matches matters: a lone cell word such as
+        "First" also occurs in ordinary prose earlier on the page ("The first
+        supply of ..."), and taking the first line with any match attributed the
+        table to the previous section. Falls back to the last section on the page
+        (a heading usually precedes its table), then to the section carried in from
+        earlier pages (a table-only or scanned page).
         """
         def norm(text: str) -> str:
             return " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
@@ -1073,16 +1077,21 @@ class TextProcessor:
         cells = list(table.get("header") or [])
         for row in (table.get("rows") or [])[:3]:
             cells.extend(row)
-        probes = [
+        probes = {
             norm(cell) for cell in cells
             if cell is not None and str(cell).strip().lower() != "none"
             and len(re.findall(r"[A-Za-z]", str(cell))) >= 4
-        ]
+        }
+        probes.discard("")
         if probes and line_sections:
+            best_section, best_hits = None, 0
             for line, section in line_sections:
-                normalized = norm(line)
-                if any(probe and probe in normalized for probe in probes):
-                    return section
+                padded = f" {norm(line)} "
+                hits = sum(1 for probe in probes if f" {probe} " in padded)
+                if hits > best_hits:
+                    best_section, best_hits = section, hits
+            if best_hits:
+                return best_section
         if line_sections:
             return line_sections[-1][1]
         return entering
