@@ -499,12 +499,20 @@ class RAGPipeline:
                         file_ids=hybrid_file_ids,
                     )
                 if not section_documents:
-                    section_documents = await self.vector_db.search_by_section(
-                        section_ref,
-                        limit=settings.section_search_limit,
-                        user_id=section_user_id,
-                        excluded_file_ids=excluded_file_ids,
-                    )
+                    # Outside the hybrid files a section label alone says nothing
+                    # about the question ("Section B" heads slides in many decks),
+                    # so only trust it for a document the question names.
+                    query_terms = self.vector_db._keyword_terms(query)
+                    section_documents = [
+                        document
+                        for document in await self.vector_db.search_by_section(
+                            section_ref,
+                            limit=settings.section_search_limit,
+                            user_id=section_user_id,
+                            excluded_file_ids=excluded_file_ids,
+                        )
+                        if self._filename_affinity(document.get("filename", ""), query_terms) > 0
+                    ]
                 matched = len(section_documents)
                 section_documents = self._rank_section_documents(
                     section_documents, query, hybrid_documents, section_ref

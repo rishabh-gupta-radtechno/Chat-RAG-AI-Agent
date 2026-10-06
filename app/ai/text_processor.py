@@ -502,6 +502,14 @@ class TextProcessor:
             return None
         number = match.group(1)
         title = re.sub(r"\s*\([^)]*\)\s*$", "", match.group(2)).strip().rstrip(":").strip()
+        # A numbered table row read as text ("1 Groove Pin 61812 1", "2.13. Gross
+        # Load 50.860 T") looks like a Title-Case heading but carries values: a
+        # part number / measurement, or a trailing quantity. Headings do not, and
+        # treating such rows as headings swallowed them (an empty section is
+        # dropped), losing the row's values from the text chunks.
+        value_tokens = re.findall(r"(?<![\w.])\d[\d.,/]*(?![\w.])", title)
+        if any(len(re.sub(r"\D", "", v)) >= 3 for v in value_tokens) or re.search(r"\s\d[\d.,/]*$", title):
+            return None
         words = [w for w in title.split() if any(c.isalpha() for c in w)]
         if not (1 <= len(words) <= 9):
             return None
